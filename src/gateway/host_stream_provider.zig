@@ -2,6 +2,7 @@ const std = @import("std");
 const stream_provider = @import("../core/agent/stream_provider.zig");
 const io_mod = @import("../core/shared/io.zig");
 const gateway_client = @import("client.zig");
+const vercel_protocol = @import("vercel_protocol.zig");
 const credential_authority = @import("../core/auth/credential_authority.zig");
 
 const Allocator = std.mem.Allocator;
@@ -55,6 +56,7 @@ pub fn provider(context: *ProviderContext) stream_provider.Provider {
         .context = context,
         .stream_fn = stream,
         .build_request_fn = buildRequest,
+        .project_replay_fn = vercel_protocol.selectReplayParts,
     };
 }
 
@@ -66,6 +68,54 @@ pub fn initContext(
     return .{ .build_fn = build_fn, .endpoint = endpoint, .transport = transport };
 }
 
+test "host provider selects replay without changing canonical input" {
+    const Unused = struct {
+        fn build(_: Allocator, _: stream_provider.RequestData) ![]u8 {
+            return error.UnexpectedRequest;
+        }
+        fn open(_: ?*anyopaque, _: []const u8, _: []const u8, _: []const u8, _: []const u8) !i32 {
+            return error.UnexpectedRequest;
+        }
+        fn status(_: ?*anyopaque, _: i32, _: *u16) i32 {
+            return -1;
+        }
+        fn next(_: ?*anyopaque, _: i32, _: []u8) i32 {
+            return -1;
+        }
+        fn close(_: ?*anyopaque, _: i32) void {}
+    };
+    const types = @import("../core/shared/types.zig");
+    const alloc = std.testing.allocator;
+    var context = initContext(Unused.build, .{ .fixed = "https://example.invalid" }, .{
+        .context = null,
+        .open_fn = Unused.open,
+        .status_fn = Unused.status,
+        .next_fn = Unused.next,
+        .close_fn = Unused.close,
+    });
+    const adapter = provider(&context);
+    const parts = "[{\"type\":\"reasoning\",\"text\":\"retained\"},{\"type\":\"tool-call\",\"toolCallId\":\"read\"},{\"type\":\"text\",\"offset\":0,\"length\":6}]";
+    const replay = types.ProviderReplay{
+        .source = .{ .provider = .gateway, .model = "fixture-model" },
+        .parts_json = parts,
+    };
+    const calls = [_]types.ToolCall{.{ .id = "read", .name = "read_file", .arguments_json = "{}" }};
+    const unchanged = (try adapter.projectReplay(alloc, replay, &calls, true, true)).?;
+    try std.testing.expect(unchanged.parts_json.ptr == parts.ptr);
+
+    const selected = (try adapter.projectReplay(alloc, replay, &calls, false, true)).?;
+    defer alloc.free(selected.parts_json);
+    try std.testing.expectEqualStrings("[{\"type\":\"reasoning\",\"text\":\"retained\"},{\"type\":\"tool-call\",\"toolCallId\":\"read\"}]", selected.parts_json);
+    try std.testing.expectEqualStrings(parts, replay.parts_json);
+    try std.testing.expect(selected.matches(replay.source));
+    try std.testing.expectEqual(@as(?types.ProviderReplay, null), try adapter.projectReplay(alloc, replay, &.{}, false, false));
+    try std.testing.expectEqual(@as(?types.ProviderReplay, null), try adapter.projectReplay(alloc, null, &.{}, true, true));
+    try std.testing.expectError(error.InvalidProviderState, adapter.projectReplay(alloc, .{
+        .source = replay.source,
+        .parts_json = "{}",
+    }, &.{}, false, true));
+}
+
 fn stream(raw: ?*anyopaque, alloc: Allocator, request: stream_provider.ModelRequest) anyerror!stream_provider.Result {
     if (deadlineExpired(request.deadline)) return error.Timeout;
     const context: *ProviderContext = @ptrCast(@alignCast(raw.?));
@@ -73,24 +123,26 @@ fn stream(raw: ?*anyopaque, alloc: Allocator, request: stream_provider.ModelRequ
     const payload = request.prepared_request_body orelse
         try context.build_fn(alloc, request.data());
     defer if (request.prepared_request_body == null) alloc.free(payload);
-    const auth = try std.fmt.allocPrint(alloc, "Bearer {s}", .{request.credential.secret});
-    defer alloc.free(auth);
+    const auth = if (request.credential.secret()) |credential|
+        try std.fmt.allocPrint(alloc, "Bearer {s}", .{credential})
+    else
+        null;
+    defer if (auth) |value| alloc.free(value);
 
     const Header = struct { name: []const u8, value: []const u8 };
     var headers: std.ArrayList(Header) = .empty;
     defer headers.deinit(alloc);
     try headers.appendSlice(alloc, &.{
         .{ .name = "content-type", .value = "application/json" },
-        .{ .name = "authorization", .value = auth },
         .{ .name = "HTTP-Referer", .value = "https://github.com/vercel-labs/fx" },
         .{ .name = "X-Title", .value = "fx" },
-        .{ .name = gateway_client.vercel_gateway_extended_time_header, .value = gateway_client.vercel_gateway_extended_time_value },
         .{ .name = "ai-gateway-protocol-version", .value = "0.0.1" },
         .{ .name = "ai-language-model-specification-version", .value = "4" },
         .{ .name = "ai-language-model-id", .value = request.model },
         .{ .name = "ai-language-model-streaming", .value = "true" },
     });
-    if (request.credential.tenant) |team| if (team.len > 0) try headers.append(alloc, .{ .name = "x-vercel-ai-gateway-team", .value = team });
+    if (auth) |value| try headers.append(alloc, .{ .name = "authorization", .value = value });
+    if (request.credential.tenant()) |team| if (team.len > 0) try headers.append(alloc, .{ .name = "x-vercel-ai-gateway-team", .value = team });
     if (request.session_id) |session_id| if (session_id.len > 0) try headers.appendSlice(alloc, &.{
         .{ .name = "x-session-id", .value = session_id },
         .{ .name = "x-session-affinity", .value = session_id },
@@ -192,17 +244,17 @@ fn gatewayUsageReference(
     completion: @import("../core/shared/types.zig").ModelCompletion,
 ) ?stream_provider.DeferredUsageReference {
     const generation_id = completion.generation_id orelse return null;
-    const source = request.credential.source orelse return null;
+    const source = request.credential.credentialSource() orelse return null;
     return .{
         .provider = .gateway,
         .generation_id = generation_id,
         .scope = gateway_client.generationBaseUrl(),
-        .tenant = request.credential.tenant,
-        .account_id = request.credential.account_id,
+        .tenant = request.credential.tenant(),
+        .account_id = request.credential.accountId(),
         .credential_source = source,
         .credential_identity = credential_authority.derive(
             source,
-            request.credential.account_id,
+            request.credential.accountId(),
         ),
     };
 }

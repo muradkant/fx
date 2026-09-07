@@ -139,8 +139,6 @@ pub fn run(
         .config = .{
             .system_prompt = config.system_prompt,
             .model_prompt_overlay = config.model_prompt_overlay,
-            .skills_prompt_section = config.skills_prompt_section,
-            .explicit_skills_prompt_section = config.explicit_skills_prompt_section,
             .gateway_retry_count = config.tool_context.gateway_retry_count,
             .gateway_chat_url = config.tool_context.gateway_chat_url,
             .advertised_tool_names = config.advertised_tool_names,
@@ -233,18 +231,17 @@ fn appendRuntimeContext(raw: *anyopaque, arena: Allocator, messages: *std.ArrayL
         .access_scope = tool_ctx.access_scope,
         .interactive = true,
         .permission_mode = context.prompt.permission_mode,
-        .tracker = tool_ctx.tracker,
     }, arena, messages);
 }
 
-fn appendStaticContext(raw: *anyopaque, arena: Allocator, messages: *std.ArrayList(types.ChatMessage)) !void {
+fn appendStaticContext(raw: *anyopaque, arena: Allocator, project_context: ?[]const u8, messages: *std.ArrayList(types.ChatMessage)) !void {
     const context: *Context = @ptrCast(@alignCast(raw));
-    const project_context = if (context.prompt.context_snapshot.modelVisibleBytes().len > 0)
+    const snapshot_context = if (context.prompt.context_snapshot.modelVisibleBytes().len > 0)
         context.prompt.context_snapshot.modelVisibleBytes()
     else
         "";
     try context.config.tool_context.context_registry.appendDefaultStatic(.{
-        .project_context = project_context,
+        .project_context = project_context orelse snapshot_context,
     }, arena, messages);
 }
 
@@ -264,9 +261,10 @@ fn admissionContext(context: *Context, dynamic_names: []const []const u8, review
     return tool_ctx;
 }
 
-fn requestToolPermission(raw: *anyopaque, arena: Allocator, call: types.ToolCall, review: auto_classifier.ReviewTurnContext, mode: types.PermissionMode, grants: []const types.PermissionGrant, live: ?agent_runtime.LiveToolAuthority, revalidation: ?agent_runtime.LivePermissionRevalidation, dynamic_names: []const []const u8) !command_admission.PermissionOutcome {
+fn requestToolPermission(raw: *anyopaque, arena: Allocator, call: types.ToolCall, review: auto_classifier.ReviewTurnContext, mode: types.PermissionMode, grants: []const types.PermissionGrant, live: ?agent_runtime.LiveToolAuthority, revalidation: ?agent_runtime.LivePermissionRevalidation, dynamic_names: []const []const u8, mcp_review_schema_json: ?[]const u8) !command_admission.PermissionOutcome {
     const context: *Context = @ptrCast(@alignCast(raw));
-    const tool_ctx = admissionContext(context, dynamic_names, review);
+    var tool_ctx = admissionContext(context, dynamic_names, review);
+    tool_ctx.mcp_review_schema_json = mcp_review_schema_json;
     if (revalidation) |request| return switch (request) {
         .action => |action| tool_admission.revalidateLiveActionPermissionOutcome(tool_ctx.admissionInputWithLiveAuthority(live), arena, call, mode, grants, action.authority, action.human_approval),
     };
@@ -282,7 +280,7 @@ fn requestPreparedFileMutationPermission(raw: *anyopaque, arena: Allocator, call
 fn resolveToolActionDisplayTarget(raw: *anyopaque, arena: Allocator, call: types.ToolCall) !?[]const u8 {
     const context: *Context = @ptrCast(@alignCast(raw));
     const tool_ctx = context.toolContext();
-    return tool_presentation.resolveTerminalDisplayTarget(arena, tool_ctx.tool_registry, tool_ctx.workspace_root, tool_ctx.terminal_client, call);
+    return tool_presentation.resolveTerminalDisplayTarget(arena, tool_ctx.tool_registry, tool_ctx.workspace_root, tool_ctx.terminal_client, tool_ctx.managed_executions, call);
 }
 
 fn describeToolAction(raw: *anyopaque, arena: Allocator, call: types.ToolCall, display_target: ?[]const u8, _: []const []const u8) ![]const u8 {
@@ -328,7 +326,7 @@ fn captureText(raw: *anyopaque, emission: agent_runtime.TextEmission) !void {
     const context: *Context = @ptrCast(@alignCast(raw));
     switch (emission) {
         .assistant_source => |text| try context.output.appendSlice(context.config.alloc, text),
-        .assistant_rendered, .operational => {},
+        .assistant_started, .assistant_rendered, .assistant_restarted, .operational => {},
     }
 }
 

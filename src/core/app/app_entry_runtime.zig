@@ -5,6 +5,7 @@ const app_session_runtime = @import("app_session_runtime.zig");
 const auto_upgrade = @import("../upgrade/auto_upgrade.zig");
 const acp_runner = @import("../cli/acp_runner.zig");
 const cli_surface = @import("../cli/cli_surface.zig");
+const credentials = @import("../auth/credentials.zig");
 const process_provider = @import("../execution/process_provider.zig");
 const gateway_provider = @import("../gateway/gateway_provider.zig");
 const provider_set = @import("../gateway/provider_set.zig");
@@ -66,6 +67,7 @@ pub const Config = struct {
     version: []const u8 = "",
     revision: []const u8 = "",
     build_channel: update_target.Channel = .stable,
+    auth_mode: credentials.AuthMode = .local,
     command_catalog: command_specs.TopLevelRegistry,
     default_model: []const u8,
     default_agent_step_limit: usize,
@@ -160,7 +162,7 @@ fn runWithDeps(comptime App: type, alloc: Allocator, args: []const [:0]const u8,
         .exit => |code| return .{ .exit = code },
     }
 
-    return runInteractiveWithDeps(App, false, alloc, &launch, deps);
+    return runInteractiveWithDeps(App, false, alloc, &launch, cfg.auth_mode, deps);
 }
 
 pub fn runBeforeInteractive(alloc: Allocator, args: []const [:0]const u8, cfg: Config) !BeforeInteractiveResult {
@@ -219,23 +221,23 @@ fn benchEnabled() bool {
     return io_mod.getenv("FX_BENCH") != null;
 }
 
-pub fn runInteractive(comptime App: type, alloc: Allocator, launch: *cli_surface.InteractiveLaunch) !RunOutcome {
-    return runInteractiveWithDeps(App, false, alloc, launch, .{});
+pub fn runInteractive(comptime App: type, alloc: Allocator, launch: *cli_surface.InteractiveLaunch, auth_mode: credentials.AuthMode) !RunOutcome {
+    return runInteractiveWithDeps(App, false, alloc, launch, auth_mode, .{});
 }
 
 /// Runs the interactive product without native CLI dispatch, process replacement,
 /// or a worker thread. Single-threaded hosts must arrange cooperative prompt work.
-pub fn runInteractiveCooperative(comptime App: type, alloc: Allocator, launch: *cli_surface.InteractiveLaunch) !RunOutcome {
-    return runInteractiveWithDeps(App, true, alloc, launch, .{});
+pub fn runInteractiveCooperative(comptime App: type, alloc: Allocator, launch: *cli_surface.InteractiveLaunch, auth_mode: credentials.AuthMode) !RunOutcome {
+    return runInteractiveWithDeps(App, true, alloc, launch, auth_mode, .{});
 }
 
 fn unavailableCliDispatch(_: ?*anyopaque, _: Allocator, _: []const [:0]const u8, _: cli_surface.Config) anyerror!cli_surface.RunResult {
     return error.UnknownCliCommand;
 }
 
-fn runInteractiveWithDeps(comptime App: type, comptime cooperative: bool, alloc: Allocator, launch: *cli_surface.InteractiveLaunch, deps: RunDeps) !RunOutcome {
+fn runInteractiveWithDeps(comptime App: type, comptime cooperative: bool, alloc: Allocator, launch: *cli_surface.InteractiveLaunch, auth_mode: credentials.AuthMode, deps: RunDeps) !RunOutcome {
     const resume_requested = launch.requested_resume != null;
-    var app = App.init(alloc, launch) catch |err| {
+    var app = App.init(alloc, launch, auth_mode) catch |err| {
         switch (err) {
             error.NotATerminal => {
                 writeStderr(deps, "fx requires an interactive terminal (TTY).\n");
@@ -268,7 +270,7 @@ fn runInteractiveWithDeps(comptime App: type, comptime cooperative: bool, alloc:
             error.SessionAuthorityBoundaryUnavailable,
             error.SessionCommitBoundaryUnavailable,
             => {
-                writeStderr(deps, "fx: this session is being updated; wait a moment and retry\n");
+                writeStderr(deps, "fx: a saved session has an unfinished update that could not be recovered; run `fx doctor` to identify the affected session\n");
                 return .{ .exit = 1 };
             },
             error.OneOffSessionNotResumable => {
@@ -294,7 +296,15 @@ fn runInteractiveWithDeps(comptime App: type, comptime cooperative: bool, alloc:
         if (@hasDecl(App, "rebindAfterInit")) app.rebindAfterInit();
     }
     var app_needs_deinit = true;
-    defer if (app_needs_deinit) app.deinit();
+    defer if (app_needs_deinit) {
+        if (comptime cooperative) {
+            app.deinit();
+        } else {
+            var shutdown = app.deinitWithResumeHandoff();
+            defer shutdown.deinit(alloc);
+            if (shutdown.failure) |err| reportShutdownFailure(deps, err);
+        }
+    };
     if (comptime !cooperative and @hasField(App, "session") and
         @hasDecl(@TypeOf(app.session), "attachProfileUsagePublisher"))
     {
@@ -316,7 +326,20 @@ fn runInteractiveWithDeps(comptime App: type, comptime cooperative: bool, alloc:
 
     app.run() catch |err| {
         app.releaseTerminal();
-        if (err == error.TerminalInputClosed) return .returned;
+        if (err == error.TerminalInputClosed) {
+            app_needs_deinit = false;
+            if (comptime cooperative) {
+                app.deinit();
+            } else {
+                var shutdown = app.deinitWithResumeHandoff();
+                defer shutdown.deinit(alloc);
+                if (shutdown.failure) |failure| {
+                    reportShutdownFailure(deps, failure);
+                    return .{ .exit = 1 };
+                }
+            }
+            return .returned;
+        }
         reportUnexpectedInteractiveError(deps, err);
         return err;
     };
@@ -337,10 +360,19 @@ fn runInteractiveWithDeps(comptime App: type, comptime cooperative: bool, alloc:
     );
     defer graceful_exit_sigint_guard.deinit();
     app_needs_deinit = false;
-    const handoff_value = if (comptime cooperative) blk: {
+    const shutdown: app_session_runtime.ShutdownOutcome = if (comptime cooperative) blk: {
         app.deinit();
-        break :blk null;
+        break :blk .{};
     } else app.deinitWithResumeHandoff();
+    const handoff_value = shutdown.handoff;
+    if (shutdown.failure) |err| {
+        if (handoff_value) |value| {
+            var handoff = value;
+            handoff.deinit(alloc);
+        }
+        reportShutdownFailure(deps, err);
+        return .{ .exit = 1 };
+    }
     if (relaunch_request) |request| {
         if (handoff_value) |value| {
             var handoff = value;
@@ -384,6 +416,13 @@ fn runInteractiveWithDeps(comptime App: type, comptime cooperative: bool, alloc:
     return .returned;
 }
 
+fn reportShutdownFailure(deps: RunDeps, err: anyerror) void {
+    var buffer: [256]u8 = undefined;
+    const text = std.fmt.bufPrint(&buffer, "fx: session save failed: {s}\n", .{@errorName(err)}) catch
+        "fx: session save failed\n";
+    writeStderr(deps, text);
+}
+
 fn replaceProcessDefault(
     _: ?*anyopaque,
     zio: std.Io,
@@ -411,6 +450,7 @@ fn cliSurfaceConfig(cfg: Config) cli_surface.Config {
         .version = cfg.version,
         .revision = cfg.revision,
         .build_channel = cfg.build_channel,
+        .auth_mode = cfg.auth_mode,
         .command_catalog = cfg.command_catalog,
         .default_model = cfg.default_model,
         .default_agent_step_limit = cfg.default_agent_step_limit,
@@ -620,6 +660,7 @@ const TestCapture = struct {
     record_stderr_event: bool = false,
     record_stdout_event: bool = false,
     resume_handoff_id: ?[]const u8 = null,
+    shutdown_failure: ?anyerror = null,
     raise_sigint_during_deinit: bool = false,
     upgrade_relaunch_path: ?[]const u8 = null,
     upgrade_previous_revision: ?[]const u8 = null,
@@ -734,7 +775,7 @@ const TestApp = struct {
     requested_resume: ?cli_surface.ResumeTarget = null,
     terminal_released: bool = false,
 
-    fn init(_: Allocator, launch: *cli_surface.InteractiveLaunch) !TestApp {
+    fn init(_: Allocator, launch: *cli_surface.InteractiveLaunch, _: credentials.AuthMode) !TestApp {
         appendInitEvent(launch);
         if (active_capture.?.init_error) |err| return err;
 
@@ -753,11 +794,11 @@ const TestApp = struct {
         self.* = undefined;
     }
 
-    fn deinitWithResumeHandoff(self: *TestApp) ?app_session_runtime.ResumeHandoff {
+    fn deinitWithResumeHandoff(self: *TestApp) app_session_runtime.ShutdownOutcome {
         const handoff: ?app_session_runtime.ResumeHandoff = if (active_capture.?.resume_handoff_id) |id| blk: {
             const session_id = std.testing.allocator.dupe(u8, id) catch {
                 self.deinit();
-                return null;
+                return .{ .failure = error.OutOfMemory };
             };
             break :blk .{ .session_id = session_id };
         } else null;
@@ -765,7 +806,7 @@ const TestApp = struct {
             _ = std.c.raise(std.posix.SIG.INT);
         }
         self.deinit();
-        return handoff;
+        return .{ .handoff = handoff, .failure = active_capture.?.shutdown_failure };
     }
 
     fn takeUpgradeRelaunchRequest(_: *TestApp) ?auto_upgrade.RelaunchRequest {
@@ -906,6 +947,21 @@ test "app entry runs interactive startup callbacks in active order" {
     try std.testing.expectEqual(RunOutcome.returned, outcome);
     try std.testing.expectEqual(@as(usize, 0), capture.stdout_calls);
     try expectEvents(&.{ "init:none", "mcp-discovery", "rebind-after-init", "auto-upgrade", "file-index", "worker-thread", "model-cache", "run", "terminal-release", "deinit" });
+}
+
+test "app entry reports persistence failure after teardown instead of a successful handoff" {
+    const alloc = std.testing.allocator;
+    var capture = TestCapture.init(.{ .interactive = .{} });
+    defer capture.deinit();
+    capture.resume_handoff_id = "session-123";
+    capture.shutdown_failure = error.InputOutput;
+    capture.record_stderr_event = true;
+    const outcome = try runWithDeps(TestApp, alloc, &.{}, testConfig(), capture.deps());
+    try std.testing.expectEqual(RunOutcome{ .exit = 1 }, outcome);
+    try std.testing.expectEqualStrings("fx: session save failed: InputOutput\n", capture.stderr.written());
+    try std.testing.expectEqual(@as(usize, 0), capture.stdout_calls);
+    try std.testing.expectEqualStrings("deinit", test_events[test_event_count - 2]);
+    try std.testing.expectEqualStrings("stderr-attempt", test_events[test_event_count - 1]);
 }
 
 test "app entry writes exact resume handoff after interactive teardown" {
@@ -1277,11 +1333,11 @@ test "app entry maps unavailable session state to one expected startup failure" 
         },
         .{
             .init_error = error.SessionAuthorityBoundaryUnavailable,
-            .message = "fx: this session is being updated; wait a moment and retry\n",
+            .message = "fx: a saved session has an unfinished update that could not be recovered; run `fx doctor` to identify the affected session\n",
         },
         .{
             .init_error = error.SessionCommitBoundaryUnavailable,
-            .message = "fx: this session is being updated; wait a moment and retry\n",
+            .message = "fx: a saved session has an unfinished update that could not be recovered; run `fx doctor` to identify the affected session\n",
         },
         .{
             .init_error = error.OneOffSessionNotResumable,
@@ -1302,4 +1358,19 @@ test "app entry maps unavailable session state to one expected startup failure" 
         try std.testing.expectEqual(@as(usize, 1), capture.stderr_calls);
         try expectEvents(&.{"init:none"});
     }
+}
+
+test "app entry returns failure when terminal closure cannot save the session" {
+    var capture = TestCapture.init(.{ .interactive = .{} });
+    defer capture.deinit();
+    capture.run_error = error.TerminalInputClosed;
+    capture.shutdown_failure = error.InputOutput;
+    capture.resume_handoff_id = "session-123";
+    capture.record_stderr_event = true;
+    const outcome = try runWithDeps(TestApp, std.testing.allocator, &.{}, testConfig(), capture.deps());
+    try std.testing.expectEqual(RunOutcome{ .exit = 1 }, outcome);
+    try std.testing.expectEqualStrings("fx: session save failed: InputOutput\n", capture.stderr.written());
+    try std.testing.expectEqual(@as(usize, 0), capture.stdout_calls);
+    try std.testing.expectEqualStrings("deinit", test_events[test_event_count - 2]);
+    try std.testing.expectEqualStrings("stderr-attempt", test_events[test_event_count - 1]);
 }

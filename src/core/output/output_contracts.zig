@@ -546,7 +546,7 @@ pub const StatusSnapshot = struct {
         if (self.auth.team) |team| {
             try out.writer.print("[status] team={s}\n", .{team});
         }
-        try out.writer.print("[status] permission_mode={s}\n", .{permissionModeLabel(self.permission_mode)});
+        try out.writer.print("[status] permission_mode={s}\n", .{permissions.permissionModeDisplayLabel(self.permission_mode)});
         try out.writer.print("[status] workspace={s}\n", .{self.workspace_root});
         try out.writer.print("[status] history_turns={d}\n", .{self.history_turns});
         try out.writer.print("[status] session_permission_grants={d}\n", .{self.session_permission_grants});
@@ -578,7 +578,7 @@ pub const StatusSnapshot = struct {
         if (self.auth.expired) try out.writer.writeAll("auth_expired=true\n");
         if (self.auth_help) |help| try out.writer.print("auth_help={s}\n", .{help});
         if (self.auth.team) |team| try out.writer.print("team={s}\n", .{team});
-        try out.writer.print("permission_mode={s}\n", .{permissionModeLabel(self.permission_mode)});
+        try out.writer.print("permission_mode={s}\n", .{permissions.permissionModeDisplayLabel(self.permission_mode)});
         try out.writer.print("workspace={s}\n", .{self.workspace_root});
         try out.writer.print("history_turns={d}\n", .{self.history_turns});
         try out.writer.print("session_permission_grants={d}\n", .{self.session_permission_grants});
@@ -699,7 +699,7 @@ pub const PermissionsSnapshot = struct {
         var out: std.Io.Writer.Allocating = .init(alloc);
         defer out.deinit();
 
-        try out.writer.print("[permissions] mode={s}\n", .{permissionModeLabel(self.mode)});
+        try out.writer.print("[permissions] mode={s}\n", .{permissions.permissionModeDisplayLabel(self.mode)});
         try writePermissionRulesText(&out.writer, self.rules);
         if (self.grants.len == 0) {
             try out.writer.writeAll("[permissions] session grants: (none)\n");
@@ -720,7 +720,7 @@ pub const PermissionsSnapshot = struct {
         var out: std.Io.Writer.Allocating = .init(alloc);
         defer out.deinit();
 
-        try out.writer.print("mode={s}\n", .{permissionModeLabel(self.mode)});
+        try out.writer.print("mode={s}\n", .{permissions.permissionModeDisplayLabel(self.mode)});
         if (self.rules.rules.len == 0) {
             try out.writer.writeAll("configured rules: (none)\n");
         } else {
@@ -1266,13 +1266,15 @@ pub const SessionRecoverySnapshot = struct {
         self: SessionRecoverySnapshot,
         alloc: Allocator,
     ) ![]u8 {
+        const usage_warning = if (self.result.usage_incomplete) "warning: historical usage is incomplete because the source accounting data is corrupt\n" else "";
         if (self.result.status == .indeterminate) {
             return std.fmt.allocPrint(
                 alloc,
-                "[session recovery] could not confirm target {s}\nsource: {s} (unchanged)\nresolve: fx --resume {s}\ninspect: fx doctor\n",
+                "[session recovery] could not confirm target {s}\nsource: {s} (unchanged)\n{s}resolve: fx --resume {s}\ninspect: fx doctor\n",
                 .{
                     self.result.recovered_session_id,
                     self.result.source_session_id,
+                    usage_warning,
                     self.result.recovered_session_id,
                 },
             );
@@ -1280,22 +1282,24 @@ pub const SessionRecoverySnapshot = struct {
         if (self.result.status == .recovered_with_unverified_artifacts) {
             return std.fmt.allocPrint(
                 alloc,
-                "[session recovery] copied {s} to {s}\nhistory_turns: {d}\nwarning: legacy command artifacts could not be authenticated\nresume: fx --resume {s}\n",
+                "[session recovery] copied {s} to {s}\nhistory_turns: {d}\nwarning: legacy command artifacts could not be authenticated\n{s}resume: fx --resume {s}\n",
                 .{
                     self.result.source_session_id,
                     self.result.recovered_session_id,
                     self.result.history_len,
+                    usage_warning,
                     self.result.recovered_session_id,
                 },
             );
         }
         return std.fmt.allocPrint(
             alloc,
-            "[session recovery] copied {s} to {s}\nhistory_turns: {d}\nresume: fx --resume {s}\n",
+            "[session recovery] copied {s} to {s}\nhistory_turns: {d}\n{s}resume: fx --resume {s}\n",
             .{
                 self.result.source_session_id,
                 self.result.recovered_session_id,
                 self.result.history_len,
+                usage_warning,
                 self.result.recovered_session_id,
             },
         );
@@ -1328,9 +1332,11 @@ pub const SessionRecoverySnapshot = struct {
             &out.writer,
         );
         try out.writer.print(
-            ",\"history_turns\":{d}}}",
+            ",\"history_turns\":{d}",
             .{self.result.history_len},
         );
+        if (self.result.usage_incomplete) try out.writer.writeAll(",\"usage_incomplete\":true");
+        try out.writer.writeByte('}');
         return try out.toOwnedSlice();
     }
 };
@@ -1372,7 +1378,7 @@ pub const DoctorSnapshot = struct {
         if (self.auth.team) |team| {
             try out.writer.print("[doctor] team={s}\n", .{team});
         }
-        try out.writer.print("[doctor] permission_mode={s}\n", .{permissionModeLabel(self.permission_mode)});
+        try out.writer.print("[doctor] permission_mode={s}\n", .{permissions.permissionModeDisplayLabel(self.permission_mode)});
         try out.writer.print("[doctor] agent_step_limit={d}\n", .{self.agent_step_limit});
         if (self.mcp) |mcp| try mcp.writeText(&out.writer, alloc, "doctor");
 
@@ -2703,6 +2709,24 @@ test "core session migration snapshot text and json stay stable" {
         "{\"kind\":\"session_migration\",\"id\":\"session.v3\",\"status\":\"migrated\",\"source_schema_version\":2,\"source_bytes\":4096}",
         json,
     );
+}
+
+test "core session recovery keeps incomplete accounting visible for every result" {
+    inline for (.{ .recovered, .recovered_with_unverified_artifacts, .indeterminate }) |status| {
+        const snapshot: SessionRecoverySnapshot = .{ .result = .{
+            .source_session_id = @constCast("source"),
+            .recovered_session_id = @constCast("copy"),
+            .history_len = 1,
+            .usage_incomplete = true,
+            .status = status,
+        } };
+        const text = try snapshot.renderText(std.testing.allocator);
+        defer std.testing.allocator.free(text);
+        try std.testing.expect(std.mem.find(u8, text, "historical usage is incomplete") != null);
+        const json = try snapshot.renderJson(std.testing.allocator);
+        defer std.testing.allocator.free(json);
+        try std.testing.expect(std.mem.find(u8, json, "\"usage_incomplete\":true") != null);
+    }
 }
 
 test "core session recovery snapshot text and json stay stable" {

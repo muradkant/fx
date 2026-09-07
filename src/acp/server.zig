@@ -7,7 +7,6 @@ const host_target = @import("../core/hosts/target.zig");
 const jsonrpc = @import("jsonrpc.zig");
 const acp_types = @import("types.zig");
 const sessions = @import("sessions.zig");
-const session_test_controls = @import("session_test_controls.zig");
 const prompt_handler = @import("prompt.zig");
 const prompt_test_controls = @import("prompt_test_controls.zig");
 const app_lifecycle = @import("../core/app/app_lifecycle.zig");
@@ -397,6 +396,19 @@ pub fn selectCredentialForProvider(
     state: *ServerState,
     provider: model_provider.ProviderId,
 ) !bool {
+    if (state.cfg.auth_mode == .host_managed) {
+        state.credential_source = .host_managed;
+        state.credential_refresh_after_ms = null;
+        state.account_id = null;
+        state.gateway_team = null;
+        if (state.active_session) |*active| {
+            active.credential_source = .host_managed;
+            active.credential_refresh_after_ms = null;
+            active.api_key = &.{};
+            active.account_id = null;
+        }
+        return true;
+    }
     const now_ms = io_mod.milliTimestamp();
     if (state.active_session) |active| {
         if (credentialMatchesProvider(active.credential_source, provider) and
@@ -696,22 +708,13 @@ pub fn disableSubagentHost(state: *ServerState) void {
 fn flushActiveSessionUsage(state: *ServerState) !void {
     const active = if (state.active_session) |*session| session else return;
     const writable = if (active.writable) |*value| value else return;
-    if (!writable.needsFinalStateReplacement(
-        active.session_rt.usage.isDirty(),
-    )) return;
+    if (!active.session_rt.usage.isDirty()) return;
 
-    var current = try writable.state.dupe(state.alloc);
-    defer current.deinit(state.alloc);
-    const history = try active.session_rt.snapshotHistory(state.alloc);
-    types.freeHistoryTurnSlice(state.alloc, current.history);
-    current.history = history;
-    const permission_state = try active.session_rt.snapshotPermissionState(state.alloc);
-    current.permission_state.deinit(state.alloc);
-    current.permission_state = permission_state;
-    current.conversation_language = active.session_rt.languageSnapshot();
     const usage_snapshot = try active.session_rt.usage.snapshot(state.alloc);
-    if (current.usage) |*old| old.deinit(state.alloc);
-    current.usage = usage_snapshot;
+    defer {
+        var owned = usage_snapshot;
+        owned.deinit(state.alloc);
+    }
     const store = if (active.store) |*value|
         value
     else
@@ -721,21 +724,16 @@ fn flushActiveSessionUsage(state: *ServerState) !void {
         writable,
         usage_snapshot,
     );
-    current.updated_at_ms = recovery_checkpoint.timestamp_ms;
-    _ = try writable.commitStateReplacement(
+    _ = try writable.appendEvent(
         state.alloc,
-        current,
-        .compaction,
-        .retry_expected_tail,
-        .{},
+        .{ .usage_checkpointed = .{ .usage = usage_snapshot } },
+        recovery_checkpoint.timestamp_ms,
     );
     try store.finishUsageRecoveryCheckpoint(
         writable.active_id,
         recovery_checkpoint,
     );
-    if (current.usage) |usage| {
-        active.session_rt.usage.markClean(usage);
-    }
+    active.session_rt.usage.markClean(usage_snapshot);
 }
 
 pub fn run(alloc: Allocator, cfg: Config) !void {
@@ -759,7 +757,7 @@ pub fn runWithTransport(
         .cfg = cfg,
         .writer = writer_value,
         .web_search_runtime = web_search_runtime.Runtime.init(.{
-            .provider = cfg.provider_set.gateway.fx_search.?,
+            .provider = cfg.provider_set.gateway.fx_search,
         }),
         .terminal_client = terminal_client_runtime.Runtime.init(
             cfg.process_provider,
@@ -809,9 +807,10 @@ pub fn runWithTransport(
         }
 
         dispatch(&state, alloc, &msg) catch |err| {
+            const auth_notice = auth_runtime.preparationFailureNotice(err);
             state.writer.writeError(alloc, msg.id, .{
-                .code = ErrorCode.internal_error,
-                .message = @errorName(err),
+                .code = if (auth_notice != null) ErrorCode.invalid_request else ErrorCode.internal_error,
+                .message = auth_notice orelse @errorName(err),
             }) catch break;
         };
         if (state.terminate_connection) break;
@@ -1705,21 +1704,24 @@ fn loadConfiguredStartupState(state: *const ServerState, alloc: Allocator) !app_
     }
     if (state.cfg.home_override) |home_dir| {
         if (state.cfg.workspace_root_override) |workspace_root| {
-            return app_lifecycle.loadEmbeddedStartupState(
+            var startup = try app_lifecycle.loadEmbeddedStartupState(
                 alloc,
                 home_dir,
                 workspace_root,
                 state.cfg.default_model,
                 state.cfg.default_agent_step_limit,
             );
+            startup.auth_mode = state.cfg.auth_mode;
+            return startup;
         }
     }
-    return app_lifecycle.loadStartupState(
+    return app_lifecycle.loadStartupStateWithAuthMode(
         alloc,
         state.cfg.gateway_provider.oauth_transport,
         state.cfg.secret_store,
         state.cfg.default_model,
         state.cfg.default_agent_step_limit,
+        state.cfg.auth_mode,
     );
 }
 
@@ -1750,6 +1752,13 @@ fn handleInitialize(state: *ServerState, alloc: Allocator, msg: *jsonrpc.Message
         });
     };
     defer startup.deinit(alloc);
+    if (state.cfg.auth_mode == .local and startup.credential == null and
+        !(startup.provider == .gateway and state.cfg.credential_override != null))
+    {
+        if (startup.credential_load_failure) |failure| {
+            if (auth_runtime.preparationError(auth_runtime.classifyCredentialFailure(failure.source, failure.err))) |err| return err;
+        }
+    }
     if (!state.cfg.minimal_kernel) {
         try app_lifecycle.applyWorkspaceLaunch(
             &startup,
@@ -1787,53 +1796,73 @@ fn handleInitialize(state: *ServerState, alloc: Allocator, msg: *jsonrpc.Message
     state.gateway_source_preference = startup.credential_source_preference;
     state.configured_model = try alloc.dupe(u8, startup.configured_model);
 
-    var startup_credential = startup.takeCredential();
-    defer if (startup_credential) |*credential| credential.deinit(alloc);
-    var routed_credential: ?credentials.Credential = null;
-    defer if (routed_credential) |*credential| credential.deinit(alloc);
-    const startup_matches_model = if (startup_credential) |credential|
-        credentialMatchesProvider(credential.source, state.provider)
-    else
-        false;
-    const startup_credential_is_final = startup_matches_model and
-        !credentials.sourceRefreshable(startup_credential.?.source);
-    const credential: *credentials.Credential = if (state.provider == .gateway and state.cfg.credential_override != null) override: {
-        routed_credential = .{
-            .token = try alloc.dupe(u8, state.cfg.credential_override.?),
-            .source = .ai_gateway_api_key,
+    if (state.cfg.auth_mode == .host_managed) {
+        state.api_key = &.{};
+        state.credential_source = .host_managed;
+        state.credential_refresh_after_ms = null;
+        state.account_id = null;
+        state.gateway_team = null;
+    } else {
+        var startup_credential = startup.takeCredential();
+        defer if (startup_credential) |*credential| credential.deinit(alloc);
+        var routed_credential: ?credentials.Credential = null;
+        defer if (routed_credential) |*credential| credential.deinit(alloc);
+        const startup_matches_model = if (startup_credential) |credential|
+            credentialMatchesProvider(credential.source, state.provider)
+        else
+            false;
+        const startup_credential_is_final = startup_matches_model and
+            !credentials.sourceRefreshable(startup_credential.?.source);
+        const credential: *credentials.Credential = if (state.provider == .gateway and state.cfg.credential_override != null) override: {
+            routed_credential = .{
+                .token = try alloc.dupe(u8, state.cfg.credential_override.?),
+                .source = .ai_gateway_api_key,
+            };
+            break :override &routed_credential.?;
+        } else if (startup_credential_is_final)
+            &startup_credential.?
+        else routed: {
+            routed_credential = try auth_runtime.prepareCredential(
+                alloc,
+                state.cfg.gateway_provider.oauth_transport,
+                state.cfg.secret_store,
+                state.provider,
+                if (state.provider == .gateway) startup.credential_source_preference else null,
+            );
+            if (routed_credential == null) {
+                return state.writer.writeError(alloc, msg.id, .{
+                    .code = ErrorCode.invalid_request,
+                    .message = if (state.provider == .codex)
+                        credentials.missing_chatgpt_credential_message
+                    else if (state.provider == .grok)
+                        credentials.missing_grok_credential_message
+                    else if (state.provider == .opencode)
+                        credentials.missing_opencode_credential_message
+                    else if (state.provider == .cline)
+                        credentials.missing_cline_credential_message
+                    else
+                        credentials.missing_credential_message,
+                });
+            }
+            break :routed &routed_credential.?;
         };
-        break :override &routed_credential.?;
-    } else if (startup_credential_is_final)
-        &startup_credential.?
-    else routed: {
-        routed_credential = try auth_runtime.prepareCredential(
-            alloc,
-            state.cfg.gateway_provider.oauth_transport,
-            state.cfg.secret_store,
-            state.provider,
-            if (state.provider == .gateway) startup.credential_source_preference else null,
-        );
-        if (routed_credential == null) {
+        if (credential.token.len == 0) {
             return state.writer.writeError(alloc, msg.id, .{
                 .code = ErrorCode.invalid_request,
-                .message = credentials.missingCredentialMessage(
-                    model_provider.requiredCredentialSource(state.provider),
-                    .cli,
-                ),
+                .message = if (state.provider == .codex)
+                    credentials.missing_chatgpt_credential_message
+                else if (state.provider == .grok)
+                    credentials.missing_grok_credential_message
+                else if (state.provider == .opencode)
+                    credentials.missing_opencode_credential_message
+                else if (state.provider == .cline)
+                    credentials.missing_cline_credential_message
+                else
+                    credentials.missing_credential_message,
             });
         }
-        break :routed &routed_credential.?;
-    };
-    if (credential.token.len == 0) {
-        return state.writer.writeError(alloc, msg.id, .{
-            .code = ErrorCode.invalid_request,
-            .message = credentials.missingCredentialMessage(
-                model_provider.requiredCredentialSource(state.provider),
-                .cli,
-            ),
-        });
+        adoptServerCredential(state, credential);
     }
-    adoptServerCredential(state, credential);
 
     state.permission_mode = startup.permission_mode;
     state.permission_rules = startup.takePermissionRules();
@@ -1868,12 +1897,15 @@ fn handleInitialize(state: *ServerState, alloc: Allocator, msg: *jsonrpc.Message
             state.alloc,
             startup_catalog,
             .{
-                .access = credentials.catalogAccessForCredentialAndAccount(
-                    state.credential_source,
-                    state.api_key,
-                    state.gateway_team,
-                    state.account_id,
-                ),
+                .access = if (state.cfg.auth_mode == .host_managed)
+                    .host_managed
+                else
+                    credentials.catalogAccessForCredentialAndAccount(
+                        state.credential_source,
+                        state.api_key,
+                        state.gateway_team,
+                        state.account_id,
+                    ),
                 .endpoint = state.cfg.gateway_models_path,
                 .cancel_flag = &catalog_cancel_flag,
             },
@@ -2007,6 +2039,7 @@ fn handleSetConfigOption(state: *ServerState, alloc: Allocator, msg: *jsonrpc.Me
             });
         if (comptime !host_target.is_wasm) {
             if (session.provider != .gateway) {
+                try refreshModelCatalogForOptions(state);
                 var model_available = false;
                 if (state.capability_resolver.catalogEntries()) |entries| {
                     for (entries) |entry| {
@@ -2054,16 +2087,7 @@ fn handleSetConfigOption(state: *ServerState, alloc: Allocator, msg: *jsonrpc.Me
             alloc,
             session,
             value,
-            session_test_controls.logOptions(),
         ) catch |err| {
-            if (modelCommitFailureTerminatesConnection(err)) {
-                try state.writer.writeError(alloc, msg.id, .{
-                    .code = ErrorCode.internal_error,
-                    .message = "Failed to persist session model",
-                });
-                state.terminate_connection = true;
-                return;
-            }
             return state.writer.writeError(alloc, msg.id, .{
                 .code = if (err == error.InvalidDurableField)
                     ErrorCode.invalid_params
@@ -2092,7 +2116,9 @@ fn handleSetConfigOption(state: *ServerState, alloc: Allocator, msg: *jsonrpc.Me
                     .message = "Non-Gateway provider switching is unavailable in this WASM runtime",
                 });
             }
-            var staged_credential = if (target == .gateway and state.cfg.credential_override != null)
+            var staged_credential: ?credentials.Credential = if (state.cfg.auth_mode == .host_managed)
+                null
+            else if (target == .gateway and state.cfg.credential_override != null)
                 credentials.Credential{
                     .token = try alloc.dupe(u8, state.cfg.credential_override.?),
                     .source = .ai_gateway_api_key,
@@ -2113,28 +2139,33 @@ fn handleSetConfigOption(state: *ServerState, alloc: Allocator, msg: *jsonrpc.Me
                         ),
                     });
             };
-            defer staged_credential.deinit(alloc);
-            if (!model_provider.authorizesCredential(target, staged_credential.source)) {
+            defer if (staged_credential) |*credential| credential.deinit(alloc);
+            if (staged_credential) |credential| if (!model_provider.authorizesCredential(target, credential.source)) {
                 return state.writer.writeError(alloc, msg.id, .{
                     .code = ErrorCode.invalid_request,
                     .message = "Credential cannot authorize the selected provider",
                 });
-            }
+            };
             const catalog_provider = catalogProviderFor(state, target) orelse
                 return state.writer.writeError(alloc, msg.id, .{
                     .code = ErrorCode.invalid_request,
                     .message = "Selected provider is unavailable in this host",
                 });
-            const access = credentials.catalogAccessForCredentialAndAccount(
-                staged_credential.source,
-                staged_credential.token,
-                staged_credential.gatewayTeam(),
-                staged_credential.accountId(),
-            );
+            const access: credentials.CatalogAccess = if (state.cfg.auth_mode == .host_managed)
+                .host_managed
+            else
+                credentials.catalogAccessForCredentialAndAccount(
+                    staged_credential.?.source,
+                    staged_credential.?.token,
+                    staged_credential.?.gatewayTeam(),
+                    staged_credential.?.accountId(),
+                );
+            // Provider selection is independent of earlier prompt cancellation.
+            var catalog_cancel_flag = std.atomic.Value(bool).init(false);
             const fetched = try catalog_provider.fetch(alloc, .{
                 .access = access,
                 .endpoint = state.cfg.gateway_models_path,
-                .cancel_flag = &session.cancel_flag,
+                .cancel_flag = &catalog_cancel_flag,
                 .view = .picker,
             });
             var catalog = switch (fetched) {
@@ -2171,18 +2202,21 @@ fn handleSetConfigOption(state: *ServerState, alloc: Allocator, msg: *jsonrpc.Me
                 session,
                 target,
                 selected_model,
-                session_test_controls.logOptions(),
-            ) catch |err| {
-                if (modelCommitFailureTerminatesConnection(err)) {
-                    state.terminate_connection = true;
-                }
+            ) catch {
                 return state.writer.writeError(alloc, msg.id, .{
                     .code = ErrorCode.internal_error,
                     .message = "Failed to persist session provider",
                 });
             };
-            state.capability_resolver.adoptOwnedCatalog(alloc, &catalog);
-            adoptServerCredential(state, &staged_credential);
+            state.capability_resolver.adoptOwnedCatalog(alloc, catalog_provider, access, &catalog);
+            if (staged_credential) |*credential| {
+                adoptServerCredential(state, credential);
+            } else {
+                state.credential_source = .host_managed;
+                session.credential_source = .host_managed;
+                session.api_key = &.{};
+                session.account_id = null;
+            }
         }
     } else if (std.mem.eql(u8, config_id, "mode")) {
         if (state.active_session) |*session| {
@@ -2192,6 +2226,7 @@ fn handleSetConfigOption(state: *ServerState, alloc: Allocator, msg: *jsonrpc.Me
         }
     }
 
+    try refreshModelCatalogForOptions(state);
     const current_model = if (state.active_session) |s| s.model else state.selected_model;
     const current_mode: []const u8 = if (state.active_session) |s| s.mode else state.cfg.mode_registry.default_mode_id;
 
@@ -2216,12 +2251,34 @@ fn handleSetConfigOption(state: *ServerState, alloc: Allocator, msg: *jsonrpc.Me
     try state.writer.writeResponse(alloc, msg.id, out.writer.buffered());
 }
 
+pub fn refreshModelCatalogForOptions(state: *ServerState) !void {
+    if (comptime host_target.is_wasm) return;
+    if (state.cfg.minimal_kernel) return;
+    const active = if (state.active_session) |*session| session else return;
+    const provider = catalogProviderFor(state, active.provider) orelse return;
+    std.debug.assert(state.active_prompt == null);
+    // Restoring the same session can leave its previous cancellation flag set.
+    var cancel_flag = std.atomic.Value(bool).init(false);
+    try state.capability_resolver.refreshIfDue(state.alloc, provider, .{
+        .access = if (state.cfg.auth_mode == .host_managed)
+            .host_managed
+        else
+            credentials.catalogAccessForCredentialAndAccount(
+                active.credential_source,
+                active.api_key,
+                state.gateway_team,
+                active.account_id,
+            ),
+        .endpoint = state.cfg.gateway_models_path,
+        .cancel_flag = &cancel_flag,
+    });
+}
+
 fn commitActiveSessionProvider(
     alloc: Allocator,
     session: *ActiveSessionState,
     provider: model_provider.ProviderId,
     model: []const u8,
-    options: session_log.Options,
 ) !void {
     session.session_write_mutex.lockUncancelable(io_mod.getIo());
     defer session.session_write_mutex.unlock(io_mod.getIo());
@@ -2238,8 +2295,6 @@ fn commitActiveSessionProvider(
             .model = @constCast(model),
         } },
         io_mod.milliTimestamp(),
-        .rollback_before_adapter_continue,
-        options,
     );
     alloc.free(session.model);
     session.model = staged_model;
@@ -2250,7 +2305,6 @@ fn commitActiveSessionModel(
     alloc: Allocator,
     session: *ActiveSessionState,
     value: []const u8,
-    options: session_log.Options,
 ) !void {
     session.session_write_mutex.lockUncancelable(io_mod.getIo());
     defer session.session_write_mutex.unlock(io_mod.getIo());
@@ -2263,7 +2317,6 @@ fn commitActiveSessionModel(
         writable,
         &session.model,
         value,
-        options,
     );
 }
 
@@ -2272,7 +2325,6 @@ fn commitSessionModel(
     writable: *session_store.LoadedWritableSession,
     active_model: *[]u8,
     value: []const u8,
-    options: session_log.Options,
 ) !void {
     const staged_model = try alloc.dupe(u8, value);
     errdefer alloc.free(staged_model);
@@ -2280,16 +2332,9 @@ fn commitSessionModel(
         alloc,
         .{ .preferences_changed = .{ .model = @constCast(value) } },
         io_mod.milliTimestamp(),
-        .rollback_before_adapter_continue,
-        options,
     );
     alloc.free(active_model.*);
     active_model.* = staged_model;
-}
-
-fn modelCommitFailureTerminatesConnection(err: anyerror) bool {
-    return err == error.SessionCommitIndeterminate or
-        err == error.SessionLogCompactionIndeterminate;
 }
 
 fn handleSetMode(state: *ServerState, alloc: Allocator, msg: *jsonrpc.Message) !void {
@@ -2742,22 +2787,6 @@ test "ACP legacy URL state requires consent and completion" {
     removeLegacyUrl(&state, "acp-new");
 }
 
-const AcpModelBoundaryFailure = struct {
-    target: session_log.Boundary,
-
-    fn hit(raw: ?*anyopaque, point: session_log.Boundary) !void {
-        const self: *AcpModelBoundaryFailure = @ptrCast(@alignCast(raw.?));
-        if (point == self.target) return error.InjectedBoundaryFailure;
-    }
-
-    fn options(self: *AcpModelBoundaryFailure) session_log.Options {
-        return .{ .test_controls = .{
-            .context = self,
-            .boundary_fn = hit,
-        } };
-    }
-};
-
 fn acpModelTestState(
     alloc: Allocator,
     id: []const u8,
@@ -2790,114 +2819,6 @@ fn acpModelTestState(
     };
 }
 
-test "ACP model commit rolls back before later request can succeed" {
-    const alloc = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    try tmp.dir.createDirPath(io_mod.getIo(), "home");
-    try tmp.dir.createDirPath(io_mod.getIo(), "workspace");
-    const home = try io_mod.dirRealpathAlloc(alloc, tmp.dir, "home");
-    defer alloc.free(home);
-    const workspace = try io_mod.dirRealpathAlloc(
-        alloc,
-        tmp.dir,
-        "workspace",
-    );
-    defer alloc.free(workspace);
-
-    var store = try session_store.Store.initFromHome(alloc, home, workspace);
-    defer store.deinit(alloc);
-    var state = try acpModelTestState(alloc, "acp-model-rollback", workspace);
-    defer state.deinit(alloc);
-    var writable = try store.startWritableSession(alloc, state);
-    defer writable.deinit(alloc);
-    var active_model = try alloc.dupe(u8, "old-model");
-    defer alloc.free(active_model);
-    var failure = AcpModelBoundaryFailure{ .target = .after_event_sync };
-
-    try std.testing.expectError(
-        error.SessionPersistenceDegraded,
-        commitSessionModel(
-            alloc,
-            &writable,
-            &active_model,
-            "rejected-model",
-            failure.options(),
-        ),
-    );
-    try std.testing.expectEqualStrings("old-model", active_model);
-    try std.testing.expectEqualStrings(
-        "old-model",
-        writable.state.preferences.model,
-    );
-    try std.testing.expect(writable.degradedTail() == null);
-
-    try commitSessionModel(
-        alloc,
-        &writable,
-        &active_model,
-        "accepted-model",
-        .{},
-    );
-    try std.testing.expectEqualStrings("accepted-model", active_model);
-    try std.testing.expectEqualStrings(
-        "accepted-model",
-        writable.state.preferences.model,
-    );
-}
-
-test "ACP indeterminate model commit leaves staged runtime value unapplied" {
-    const alloc = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    try tmp.dir.createDirPath(io_mod.getIo(), "home");
-    try tmp.dir.createDirPath(io_mod.getIo(), "workspace");
-    const home = try io_mod.dirRealpathAlloc(alloc, tmp.dir, "home");
-    defer alloc.free(home);
-    const workspace = try io_mod.dirRealpathAlloc(
-        alloc,
-        tmp.dir,
-        "workspace",
-    );
-    defer alloc.free(workspace);
-
-    var store = try session_store.Store.initFromHome(alloc, home, workspace);
-    defer store.deinit(alloc);
-    var state = try acpModelTestState(
-        alloc,
-        "acp-model-indeterminate",
-        workspace,
-    );
-    defer state.deinit(alloc);
-    var writable = try store.startWritableSession(alloc, state);
-    defer writable.deinit(alloc);
-    var active_model = try alloc.dupe(u8, "old-model");
-    defer alloc.free(active_model);
-    var failure = AcpModelBoundaryFailure{
-        .target = .after_target_namespace_sync,
-    };
-
-    const result = commitSessionModel(
-        alloc,
-        &writable,
-        &active_model,
-        "uncertain-model",
-        failure.options(),
-    );
-    try std.testing.expectError(error.SessionCommitIndeterminate, result);
-    try std.testing.expectEqualStrings("old-model", active_model);
-    try std.testing.expect(
-        modelCommitFailureTerminatesConnection(
-            error.SessionCommitIndeterminate,
-        ),
-    );
-    try std.testing.expect(
-        modelCommitFailureTerminatesConnection(
-            error.SessionLogCompactionIndeterminate,
-        ),
-    );
-}
-
 test "ACP model commits honor the active session write boundary" {
     const alloc = std.testing.allocator;
     var active: ActiveSessionState = undefined;
@@ -2919,7 +2840,6 @@ test "ACP model commits honor the active session write boundary" {
                 self.alloc,
                 self.active,
                 "new-model",
-                .{},
             ) catch |err| {
                 self.failure = err;
             };
@@ -3066,19 +2986,16 @@ test "ACP usage flush preserves snapshot ownership on allocation failure" {
 
     var counting = std.testing.FailingAllocator.init(alloc, .{});
     {
-        var current = try state.active_session.?.writable.?.state.dupe(
+        var usage = try state.active_session.?.session_rt.usage.snapshot(
             counting.allocator(),
         );
-        defer current.deinit(counting.allocator());
-        const history = try state.active_session.?.session_rt.snapshotHistory(
-            counting.allocator(),
-        );
-        defer types.freeHistoryTurnSlice(counting.allocator(), history);
+        defer usage.deinit(counting.allocator());
     }
+    try std.testing.expect(counting.alloc_index > 0);
 
     var failing = std.testing.FailingAllocator.init(
         alloc,
-        .{ .fail_index = counting.alloc_index },
+        .{ .fail_index = counting.alloc_index - 1 },
     );
     state.alloc = failing.allocator();
     try std.testing.expectError(

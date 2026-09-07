@@ -321,10 +321,12 @@ fn streamCompletion(
 ) !stream_provider.Result {
     const spec = specFromContext(raw);
     if (request.cancel_flag.load(.seq_cst)) return error.Cancelled;
-    const source_matches = request.credential.source == spec.credential_source or
-        request.credential.source == spec.alternate_credential_source;
-    const anonymous = spec.allow_anonymous and request.credential.secret.len == 0;
-    if (!source_matches or (!anonymous and !validCredential(request.credential.secret))) {
+    const credential_source = request.credential.credentialSource();
+    const source_matches = credential_source == spec.credential_source or
+        credential_source == spec.alternate_credential_source;
+    const credential_secret = request.credential.secret() orelse "";
+    const anonymous = spec.allow_anonymous and credential_secret.len == 0;
+    if (!source_matches or (!anonymous and !validCredential(credential_secret))) {
         return error.OpenAICompatibleCredentialRequired;
     }
     try validateModel(request.model, spec);
@@ -395,11 +397,12 @@ fn streamCompletionCore(
 ) !stream_provider.Result {
     if (request.cancel_flag.load(.seq_cst)) return error.Cancelled;
     const open_route = spec.resolve_route(request.model);
-    const anonymous = spec.allow_anonymous and request.credential.secret.len == 0;
+    const credential_secret = request.credential.secret() orelse "";
+    const anonymous = spec.allow_anonymous and credential_secret.len == 0;
     const auth_header = if (anonymous)
         null
     else
-        try std.fmt.allocPrint(alloc, "Bearer {s}", .{request.credential.secret});
+        try std.fmt.allocPrint(alloc, "Bearer {s}", .{credential_secret});
     defer if (auth_header) |value| secret.zeroAndFree(alloc, value);
     const request_endpoint = if (io_mod.getenv(spec.e2e_endpoint_env)) |override| endpoint: {
         if (!gateway_client.isLoopbackHttpUrl(override)) return error.InvalidE2EOpenAICompatibleEndpoint;

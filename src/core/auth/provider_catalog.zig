@@ -1,5 +1,6 @@
 const std = @import("std");
 const model_provider = @import("../config/model_provider.zig");
+const types = @import("../shared/types.zig");
 
 pub const CatalogScope = enum {
     provider_native,
@@ -15,6 +16,7 @@ pub const Entry = struct {
     description: []const u8,
     subscription: bool,
     catalog_scope: CatalogScope,
+    login_source: types.CredentialSource,
 };
 
 pub const entries = [_]Entry{
@@ -27,6 +29,7 @@ pub const entries = [_]Entry{
         .description = "Vercel account or AI Gateway billing",
         .subscription = false,
         .catalog_scope = .unified,
+        .login_source = .fx_login,
     },
     .{
         .id = .codex,
@@ -36,6 +39,7 @@ pub const entries = [_]Entry{
         .description = "ChatGPT Plus, Pro, Business, Enterprise, or Edu subscription",
         .subscription = true,
         .catalog_scope = .provider_native,
+        .login_source = .chatgpt_subscription,
     },
     .{
         .id = .grok,
@@ -45,6 +49,7 @@ pub const entries = [_]Entry{
         .description = "SuperGrok or X Premium subscription",
         .subscription = true,
         .catalog_scope = .provider_native,
+        .login_source = .grok_subscription,
     },
     .{
         .id = .opencode,
@@ -54,6 +59,7 @@ pub const entries = [_]Entry{
         .description = "Free Zen models; an API key adds paid Zen and Go models",
         .subscription = false,
         .catalog_scope = .unified,
+        .login_source = .opencode_api_key,
     },
     .{
         .id = .cline,
@@ -63,6 +69,7 @@ pub const entries = [_]Entry{
         .description = "Cline account with free and eligible ClinePass models",
         .subscription = false,
         .catalog_scope = .unified,
+        .login_source = .cline_account,
     },
 };
 

@@ -35,6 +35,7 @@ pub fn requiredCredentialSource(provider: ProviderId) ?types.CredentialSource {
 
 pub fn authorizesCredential(provider: ProviderId, source: ?types.CredentialSource) bool {
     const selected = source orelse return false;
+    if (selected == .host_managed) return true;
     return switch (provider) {
         .gateway => selected != .chatgpt_subscription and selected != .grok_subscription and selected != .opencode_anonymous and selected != .opencode_api_key and selected != .cline_account and selected != .cline_api_key,
         .codex => selected == .chatgpt_subscription,

@@ -369,10 +369,6 @@ fn stripHistoryAndRecovery(
 ) void {
     types.freeHistoryTurnSlice(alloc, prompt.history);
     prompt.history = &.{};
-    if (prompt.review_draft) |review| {
-        worker_runtime.freeQueueReviewDraft(alloc, review);
-        prompt.review_draft = null;
-    }
     if (prompt.recovery_checkpoint) |checkpoint| {
         var owned = checkpoint;
         owned.deinit(alloc);
