@@ -339,12 +339,12 @@ describe("cli: help", () => {
       expect(stdout).toContain("fx starts an interactive session by default.");
       expect(stdout).toContain("Commands:\n");
       expect(flatStdout).toContain("Run one noninteractive request");
-      expect(stdout).toContain("Sign in to a model provider");
-      expect(stdout).toContain("Sign out of a model provider");
-      expect(stdout).toContain("Choose the active model provider");
-      expect(stdout).toContain("Configure a Vercel AI Gateway API key");
-      expect(stdout).toContain("Choose a Vercel AI Gateway team");
-      expect(stdout).toContain("Show Vercel AI Gateway credits");
+      expect(flatStdout).toContain("Sign in to a model provider");
+      expect(flatStdout).toContain("Sign out of a model provider");
+      expect(flatStdout).toContain("Choose the active model provider");
+      expect(flatStdout).toContain("Configure a Vercel AI Gateway API key");
+      expect(flatStdout).toContain("Choose a Vercel AI Gateway team");
+      expect(flatStdout).toContain("Show Vercel AI Gateway credits");
       expect(stdout).not.toContain("Sign in to Vercel or a selected provider");
       expect(stdout).toContain("credits|balance");
       expect(stdout).toContain("Flags:\n");

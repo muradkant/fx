@@ -1644,12 +1644,12 @@ test "rendered top-level help is a complete CLI navigation page" {
     try std.testing.expect(std.mem.find(u8, flat, "Run one noninteractive request") != null);
     try std.testing.expect(std.mem.find(u8, flat, "Draft or publish a GitHub issue") != null);
     try std.testing.expect(std.mem.find(u8, text, "credits|balance") != null);
-    try std.testing.expect(std.mem.find(u8, text, "Sign in to a model provider") != null);
-    try std.testing.expect(std.mem.find(u8, text, "Sign out of a model provider") != null);
-    try std.testing.expect(std.mem.find(u8, text, "Choose the active model provider") != null);
-    try std.testing.expect(std.mem.find(u8, text, "Configure a Vercel AI Gateway API key") != null);
-    try std.testing.expect(std.mem.find(u8, text, "Choose a Vercel AI Gateway team") != null);
-    try std.testing.expect(std.mem.find(u8, text, "Show Vercel AI Gateway credits") != null);
+    try std.testing.expect(std.mem.find(u8, flat, "Sign in to a model provider") != null);
+    try std.testing.expect(std.mem.find(u8, flat, "Sign out of a model provider") != null);
+    try std.testing.expect(std.mem.find(u8, flat, "Choose the active model provider") != null);
+    try std.testing.expect(std.mem.find(u8, flat, "Configure a Vercel AI Gateway API key") != null);
+    try std.testing.expect(std.mem.find(u8, flat, "Choose a Vercel AI Gateway team") != null);
+    try std.testing.expect(std.mem.find(u8, flat, "Show Vercel AI Gateway credits") != null);
     try std.testing.expect(std.mem.find(u8, text, "Sign in to Vercel or a selected provider") == null);
     try std.testing.expect(std.mem.find(u8, text, "Flags:") != null);
     try std.testing.expect(std.mem.find(u8, text, "--context-limit <spec>") != null);
