@@ -25,7 +25,8 @@ const Screen = union(enum) {
 const PreviousScreen = union(enum) { overview, role: RoleRef };
 
 pub const Editor = struct {
-    arena: std.heap.ArenaAllocator,
+    // JSON's managed arrays retain allocator pointers across Editor moves.
+    arena: *std.heap.ArenaAllocator,
     root: std.json.Value,
     screen: Screen = .overview,
     selected: usize = 0,
@@ -45,7 +46,9 @@ pub const Editor = struct {
         identity_seed: [32]u8,
         regenerate_identities: bool,
     ) !Editor {
-        var arena = std.heap.ArenaAllocator.init(alloc);
+        const arena = try alloc.create(std.heap.ArenaAllocator);
+        errdefer alloc.destroy(arena);
+        arena.* = std.heap.ArenaAllocator.init(alloc);
         errdefer arena.deinit();
         const value = try std.json.parseFromSliceLeaky(
             std.json.Value,
@@ -65,7 +68,9 @@ pub const Editor = struct {
     }
 
     pub fn deinit(self: *Editor) void {
+        const alloc = self.arena.child_allocator;
         self.arena.deinit();
+        alloc.destroy(self.arena);
         self.* = undefined;
     }
 
@@ -162,6 +167,11 @@ pub const Editor = struct {
             4 => self.screen = .{ .members = .specialist },
             5 => self.screen = .specialist_access,
             6 => {
+                if (self.missingModelRole()) |role| {
+                    const message = std.fmt.bufPrint(&self.error_buffer, "Choose a model for {s}.", .{self.roleTitle(role)}) catch unreachable;
+                    self.error_len = message.len;
+                    return .redraw;
+                }
                 const source = self.serialize(alloc) catch |err| {
                     self.setErrorName("Team could not be saved", err);
                     return .redraw;
@@ -491,6 +501,28 @@ pub const Editor = struct {
         ) catch "Choose model";
     }
 
+    fn roleHasModel(self: *Editor, role: RoleRef) bool {
+        const model = self.modelObject(role) orelse return false;
+        for ([_][]const u8{ "id", "route", "name" }) |key| {
+            const value = model.get(key) orelse return false;
+            if (value != .string or std.mem.trim(u8, value.string, " \t\r\n").len == 0) return false;
+        }
+        return true;
+    }
+
+    fn missingModelRole(self: *Editor) ?RoleRef {
+        if (!self.roleHasModel(.primary)) return .primary;
+        for (self.roleArray(.peer).items, 0..) |_, index| {
+            const role: RoleRef = .{ .peer = index };
+            if (!self.roleHasModel(role)) return role;
+        }
+        for (self.roleArray(.specialist).items, 0..) |_, index| {
+            const role: RoleRef = .{ .specialist = index };
+            if (!self.roleHasModel(role)) return role;
+        }
+        return null;
+    }
+
     fn setRoleModel(self: *Editor, role: RoleRef, input: []const u8) !void {
         const provider = self.teamString("provider_id");
         var route: []const u8 = undefined;
@@ -818,6 +850,97 @@ fn replaceArrayString(values: *std.json.Array, expected: []const u8, replacement
 }
 
 const test_identity_seed = [_]u8{0x5a} ** 32;
+
+const empty_test_team =
+    "{\"schema\":2,\"id\":\"test-team\",\"revision\":1,\"name\":\"Test\",\"provider_id\":\"opencode\",\"models\":[" ++
+    "{\"id\":\"primary-model\",\"route\":\"\",\"name\":\"\"},{\"id\":\"peer-model\",\"route\":\"\",\"name\":\"\"}]," ++
+    "\"primary\":{\"id\":\"primary\",\"model_id\":\"primary-model\",\"definition\":\"Own.\"}," ++
+    "\"peers\":[{\"id\":\"peer\",\"model_id\":\"peer-model\",\"definition\":\"Help.\"}],\"specialists\":[]}";
+
+test "Team editor array allocators survive initialization and relocation" {
+    const alloc = std.testing.allocator;
+    var original = try Editor.init(alloc, empty_test_team, test_identity_seed, true);
+    const moved = try alloc.create(Editor);
+    defer alloc.destroy(moved);
+    moved.* = original;
+    original = undefined;
+    defer moved.deinit();
+    // Managed JSON arrays retain their allocator context. It must belong to
+    // the live editor, never an initializer's stack frame or its former copy.
+    try std.testing.expectEqual(moved.arena.allocator().ptr, moved.models().allocator.ptr);
+    try std.testing.expectEqual(moved.arena.allocator().ptr, moved.roleArray(.peer).allocator.ptr);
+    try std.testing.expectEqual(moved.arena.allocator().ptr, moved.roleArray(.specialist).allocator.ptr);
+}
+
+test "Team editor preserves selected models when adding and removing roles" {
+    const alloc = std.testing.allocator;
+    var editor = try Editor.init(alloc, empty_test_team, test_identity_seed, true);
+    defer editor.deinit();
+    try editor.setRoleModel(.primary, "deepseek-v4-flash-vision-exp");
+    try editor.setRoleModel(.{ .peer = 0 }, "go/deepseek-v4-pro");
+    const peer = try editor.addRole(.peer);
+    try editor.setRoleModel(peer, "kimi-k3");
+    const specialist = try editor.addRole(.specialist);
+    try editor.setRoleModel(specialist, "glm-5");
+    for (0..2) |iteration| {
+        editor.screen = .overview;
+        editor.selected = 6;
+        const outcome = try editor.submit(alloc, "");
+        switch (outcome) {
+            .save => |source| {
+                defer alloc.free(source);
+                var document = try team_document.Document.parse(alloc, source);
+                defer document.deinit();
+                try std.testing.expectEqual(@as(usize, 2), document.value.peers.len);
+                try std.testing.expectEqual(@as(usize, 1 - iteration), document.value.specialists.len);
+                try std.testing.expectEqualStrings("kimi-k3", document.value.model(document.value.peers[1].model_id).?.name);
+            },
+            else => return error.ExpectedSavedTeam,
+        }
+        if (iteration == 0) try editor.removeRole(specialist);
+    }
+}
+
+test "Team save identifies missing roles after rejected duplicate selection" {
+    const alloc = std.testing.allocator;
+    var editor = try Editor.init(alloc, empty_test_team, test_identity_seed, true);
+    defer editor.deinit();
+    editor.selected = 6;
+    _ = try editor.submit(alloc, "");
+    try std.testing.expectEqualStrings("Choose a model for Primary.", editor.projection().error_message);
+    try editor.setRoleModel(.primary, "deepseek-v4-flash");
+
+    // Choosing an already assigned model must neither fill the empty peer nor
+    // erase the primary's selection. Back navigation must not hide which role
+    // needs repair the next time Save is attempted.
+    editor.screen = .{ .role = .{ .peer = 0 } };
+    editor.applySelectedModel("deepseek-v4-flash");
+    try std.testing.expectEqualStrings("Every Team role must use a distinct model.", editor.projection().error_message);
+    _ = editor.back();
+    _ = editor.back();
+    editor.selected = 6;
+    _ = try editor.submit(alloc, "");
+    try std.testing.expectEqualStrings("Choose a model for Peer 1.", editor.projection().error_message);
+    try std.testing.expectEqualStrings("deepseek-v4-flash", editor.modelDisplay(.primary));
+    try editor.setRoleModel(.{ .peer = 0 }, "go/deepseek-v4-pro");
+
+    const peer = try editor.addRole(.peer);
+    editor.selected = 6;
+    _ = try editor.submit(alloc, "");
+    try std.testing.expectEqualStrings("Choose a model for Peer 2.", editor.projection().error_message);
+    try editor.setRoleModel(peer, "kimi-k3");
+    const specialist = try editor.addRole(.specialist);
+    editor.selected = 6;
+    _ = try editor.submit(alloc, "");
+    try std.testing.expectEqualStrings("Choose a model for Specialist 1.", editor.projection().error_message);
+    try editor.removeRole(specialist);
+    editor.selected = 6;
+    const outcome = try editor.submit(alloc, "");
+    switch (outcome) {
+        .save => |source| alloc.free(source),
+        else => return error.ExpectedSavedTeam,
+    }
+}
 
 test "guided Team editor revises without exposing JSON" {
     const alloc = std.testing.allocator;

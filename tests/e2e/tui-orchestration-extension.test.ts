@@ -220,6 +220,8 @@ function startOpenCodeTeamUxServer() {
       if (url.pathname === "/zen/models") {
         return Response.json({ data: [
           { id: "deepseek-v4-flash", object: "model" },
+          { id: "kimi-k3", object: "model" },
+          { id: "glm-5", object: "model" },
         ] });
       }
       if (url.pathname === "/go/models") {
@@ -528,6 +530,131 @@ afterEach(async () => {
 });
 
 describe.skipIf(SKIP)("tui: orchestration extension host", () => {
+  for (const removeSpecialist of [false, true]) {
+    test(`Team model selections survive role growth with ${removeSpecialist ? 0 : 1} specialists`, async () => {
+      const root = mkdtempSync(join(tmpdir(), "fx-team-model-growth-"));
+      tempDirs.push(root);
+      const home = join(root, "home");
+      const workspace = join(root, "workspace");
+      const stderrPath = join(root, "stderr.log");
+      mkdirSync(join(home, ".fx"), { recursive: true });
+      mkdirSync(workspace);
+      writeFileSync(join(home, ".fx", "opencode-auth.json"), JSON.stringify({
+        schema_version: 1, api_key: "team-growth-fixture",
+      }), { mode: 0o600 });
+      writeFileSync(join(home, ".fx", "settings.json"), JSON.stringify({
+        provider: "opencode", models: { opencode: "deepseek-v4-flash" },
+      }));
+      const provider = startOpenCodeTeamUxServer();
+      try {
+        session = await TmuxSession.create({ cwd: workspace, stderrPath, env: {
+          HOME: home, FX_AUTO_UPGRADE: "0", FX_DISABLE_KEYCHAIN: "1",
+          FX_SKIP_ONBOARDING: "1", OPENCODE_API_KEY: undefined,
+          FX_E2E_OPENCODE_CHAT_URL: provider.chatUrl,
+          FX_E2E_OPENCODE_ZEN_MODELS_URL: provider.zenModelsUrl,
+          FX_E2E_OPENCODE_GO_MODELS_URL: provider.goModelsUrl,
+          FX_E2E_OPENCODE_PROTOCOL_METADATA_URL: provider.protocolMetadataUrl,
+        } });
+        const active = session;
+        const choose = async (label: string) => {
+          for (let i = 0; i < 12; i++) {
+            if ((await active.capturePane()).includes(`› ${label}`)) {
+              await active.sendKeys("Enter");
+              return;
+            }
+            await active.sendKeys("Down");
+          }
+          throw new Error(`Could not select ${label}: ${await active.capturePane()}`);
+        };
+        const back = async (selected: string) => {
+          await active.sendKeys("Escape");
+          await active.waitForPane((pane) => pane.includes(`› ${selected}`), 5_000);
+        };
+        const model = async (id: string) => {
+          await choose("Model");
+          await active.waitForText("Models", 5_000);
+          await active.sendLiteral(id);
+          await active.sendKeys("Enter");
+          await active.waitForText(`Model  ${id}`, 5_000);
+        };
+        await active.waitForComposer(10_000);
+        await active.sendText("/alt");
+        await active.waitForText("ALT Teams 0", 5_000);
+        await active.sendKeys("Enter");
+        await choose("Primary");
+        await model("deepseek-v4-flash");
+        await back("Name");
+        await choose("Peers");
+        await choose("Peer 1");
+        await model("go/deepseek-v4-pro");
+        await back("Peer 1");
+        await choose("+ Add peer");
+        if (removeSpecialist) {
+          await choose("Model");
+          await active.waitForText("Models", 5_000);
+          await active.sendLiteral("deepseek-v4-flash");
+          await active.sendKeys("Enter");
+          await active.waitForText("Every Team role must use a distinct model.", 5_000);
+          await back("Peer 1");
+          await back("Name");
+          await choose("Save & start");
+          await active.waitForText("Choose a model for Peer 2.", 5_000);
+          await choose("Peers");
+          await choose("Peer 2");
+        }
+        await model("kimi-k3");
+        await back("Peer 1");
+        await back("Name");
+        await choose("Specialists");
+        await choose("+ Add specialist");
+        await model("glm-5");
+        if (removeSpecialist) {
+          await choose("Remove role");
+          await choose("Remove ");
+        } else {
+          await back("Specialist 1");
+        }
+        await back("Name");
+        await choose("Save & start");
+        await active.waitForText("ALT mode enabled.", 5_000);
+        const teamsRoot = join(home, ".fx", "extensions", "alt", "teams");
+        const teamId = readdirSync(teamsRoot)[0]!;
+        const manifest = JSON.parse(readFileSync(join(teamsRoot, teamId, "manifest.json"), "utf8"));
+        const saved = JSON.parse(readFileSync(join(teamsRoot, teamId, `1-${manifest.latest_digest}.json`), "utf8"));
+        expect(saved.peers).toHaveLength(2);
+        expect(saved.specialists).toHaveLength(removeSpecialist ? 0 : 1);
+        const assigned = (role: { model_id: string }) => saved.models.find(
+          (entry: { id: string }) => entry.id === role.model_id,
+        );
+        expect(assigned(saved.primary)).toMatchObject({ route: "zen", name: "deepseek-v4-flash" });
+        expect(assigned(saved.peers[0])).toMatchObject({ route: "go", name: "deepseek-v4-pro" });
+        expect(assigned(saved.peers[1])).toMatchObject({ route: "zen", name: "kimi-k3" });
+        if (!removeSpecialist) {
+          expect(assigned(saved.specialists[0])).toMatchObject({ route: "zen", name: "glm-5" });
+        }
+        expect(saved.models.map((entry: { name: string }) => entry.name).sort()).toEqual(
+          (removeSpecialist ? ["deepseek-v4-flash", "deepseek-v4-pro", "kimi-k3"] :
+            ["deepseek-v4-flash", "deepseek-v4-pro", "kimi-k3", "glm-5"]).sort(),
+        );
+        await active.waitForComposer(5_000);
+        await active.sendText("Exercise the saved Team.");
+        await active.waitForText(TEAM_UX_FIRST_MARKER, 10_000);
+        await active.waitForComposer(5_000);
+        expect(active.paneStatus()).toEqual({ dead: false, status: null });
+        expect(readFileSync(stderrPath, "utf8")).toBe("");
+        await active.sendText("/quit");
+        expect(await active.waitForSessionEnd(5_000)).toBe(true);
+        expect(readFileSync(stderrPath, "utf8")).toBe("");
+        session = null;
+      } catch (error) {
+        if (session) console.error(await session.capturePane());
+        throw error;
+      } finally {
+        provider.stop();
+      }
+    }, 60_000);
+  }
+
   test(
     "native Team UX creates revises deletes and resumes immutable ALT sessions",
     async () => {
