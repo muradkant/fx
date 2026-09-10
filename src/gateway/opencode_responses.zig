@@ -94,6 +94,7 @@ pub fn buildRequest(
     alloc: Allocator,
     request: stream_provider.RequestData,
 ) ![]u8 {
+    try request.validatePrompt();
     try validateModel(request.model);
     const budget: image_attachments.CaptureBudget = if (request.budget) |value|
         .{ .deadline = value.deadline, .cancel_flag = value.cancel_flag }
@@ -104,9 +105,8 @@ pub fn buildRequest(
 
     var instructions: std.Io.Writer.Allocating = .init(alloc);
     defer instructions.deinit();
-    for (request.messages) |message| {
-        if (message.role != .system) continue;
-        const text = message.content orelse continue;
+    for (request.instructions) |instruction| {
+        const text = instruction.content orelse continue;
         if (text.len == 0) continue;
         if (instructions.written().len > 0) try instructions.writer.writeAll("\n\n");
         try instructions.writer.writeAll(text);
@@ -503,12 +503,15 @@ test "OpenCode Responses request uses the wire model with instructions and tools
         .description = "Read",
         .input_schema = .{},
     };
-    const messages = [_]types.ChatMessage{
+    const instructions = [_]types.ChatMessage{
         .{ .role = .system, .content = "Be concise." },
+    };
+    const messages = [_]types.ChatMessage{
         .{ .role = .user, .content = "Read it." },
     };
     const body = try buildRequest(std.testing.allocator, .{
         .model = "go/muse-spark-1.3-contributor",
+        .instructions = &instructions,
         .messages = &messages,
         .tools = .{ .additional_functions = &.{read_file_schema} },
         .tool_choice = .auto,

@@ -56,6 +56,9 @@ jobs:
       - name: Run unit tests
         run: zig build test -Doptimize=${{ matrix.optimize }}
 
+      - name: Run orchestration host tests
+        run: zig build test-orchestration-extension -Doptimize=${{ matrix.optimize }}
+
       - name: Smoke test fresh binary
         shell: bash
         run: |
@@ -111,6 +114,7 @@ jobs:
       AI_GATEWAY_API_KEY: ""
       VERCEL_OIDC_TOKEN: ""
       FX_REQUIRE_TMUX: "1"
+      FX_ORCHESTRATION_E2E: "1"
       SHARD_INDEX: ${{ matrix.shard.index }}
       SHARD_COUNT: ${{ matrix.shard.shard_count }}
     steps:

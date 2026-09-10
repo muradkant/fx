@@ -19,7 +19,6 @@ const SKIP = !ENABLED || !tmuxAvailable();
 const TIMEOUT = 30_000;
 const STEERING_MARKER = "CRUCIBLE_ALT_STEERING_DONE_D4C7";
 const STEERING_FOLLOWUP_MARKER = "CRUCIBLE_ALT_STEERING_MEMORY_8A21";
-const QUEUE_FIRST_MARKER = "CRUCIBLE_ALT_QUEUE_FIRST_17C9";
 const CORRECTION_MARKER = "CRUCIBLE_ALT_CORRECTION_DONE_31B9";
 const CONTINUITY_MARKER = "CRUCIBLE_ALT_CONTEXT_SURFACE_DONE_5E72";
 const CONTINUITY_FILE_SENTINEL = "EXACT_PRE_CONSULTATION_TOOL_EVIDENCE_C82D";
@@ -182,26 +181,6 @@ function startHeldOpenCodeSteeringServer() {
   return {
     requestBodies,
     chatUrl: `http://127.0.0.1:${server.port}/chat`,
-    releaseFirst(answer: string) {
-      const controller = heldController;
-      if (!controller) throw new Error("held response is no longer active");
-      if (heldTimer) clearInterval(heldTimer);
-      heldTimer = null;
-      const terminal = JSON.stringify({ kind: "answer", answer });
-      controller.enqueue(encoder.encode(
-        `data: ${JSON.stringify({
-          id: "alt-queue-first",
-          choices: [{ delta: { content: terminal }, finish_reason: null }],
-        })}\n\n` +
-          `data: ${JSON.stringify({
-            choices: [{ delta: {}, finish_reason: "stop" }],
-            usage: { prompt_tokens: 10, completion_tokens: 4 },
-          })}\n\n` +
-          "data: [DONE]\n\n",
-      ));
-      controller.close();
-      heldController = null;
-    },
     stop() {
       if (heldTimer) clearInterval(heldTimer);
       heldTimer = null;
@@ -945,12 +924,6 @@ describe.skipIf(SKIP)("tui: orchestration extension host", () => {
         await session.waitForComposer(5_000);
         await enterSeededAlt(session);
         await session.waitForComposer(5_000);
-        await session.sendKeys("C-x");
-        await session.waitForText(
-          "Native fx subagents are unavailable while ALT mode is active.",
-          5_000,
-        );
-        await session.waitForComposer(5_000);
         expect(session.paneStatus()).toEqual({ dead: false, status: null });
 
         for (const [command, expected] of [
@@ -1014,7 +987,7 @@ describe.skipIf(SKIP)("tui: orchestration extension host", () => {
   );
 
   test(
-    "ordinary ALT input waits in the native fx queue",
+    "ordinary ALT input steers the held run through the native queue",
     async () => {
       const root = mkdtempSync(join(tmpdir(), "fx-orchestration-queue-"));
       const home = join(root, "home");
@@ -1032,6 +1005,8 @@ describe.skipIf(SKIP)("tui: orchestration extension host", () => {
       );
       tempDirs.push(root);
       const provider = startHeldOpenCodeSteeringServer();
+      const replacement =
+        "REPLACEMENT ALT INSTRUCTION MUST STEER THE HELD RUN";
 
       try {
         session = await TmuxSession.create({
@@ -1054,16 +1029,21 @@ describe.skipIf(SKIP)("tui: orchestration extension host", () => {
         await waitForFileText(tracePath, "event=agent_run_started", 10_000);
         expect(provider.requestBodies).toHaveLength(1);
 
-        await session.sendText("SECOND ALT TURN MUST WAIT IN FIFO");
-        await Bun.sleep(300);
-        expect(provider.requestBodies).toHaveLength(1);
-
-        provider.releaseFirst(QUEUE_FIRST_MARKER);
-        await session.waitForText(QUEUE_FIRST_MARKER, 10_000);
+        // Plain Enter is steering during an active turn, so the held run is
+        // interrupted and the replacement instruction is committed to the same
+        // ALT session instead of starting a second concurrent turn.
+        await session.sendText(replacement);
+        const steeringTrace = await waitForFileText(
+          tracePath,
+          "event=user_instruction_committed",
+          10_000,
+        );
+        expect(steeringTrace).toContain("event=agent_run_interrupted");
         await session.waitForText(STEERING_MARKER, 10_000);
         await session.waitForComposer(10_000);
         expect(provider.requestBodies).toHaveLength(2);
-        expect(provider.requestBodies[1]).toContain("SECOND ALT TURN MUST WAIT IN FIFO");
+        expect(provider.requestBodies[1]).toContain(replacement);
+        expect((steeringTrace.match(/event=session_created/g) ?? []).length).toBe(1);
         expect(session.paneStatus()).toEqual({ dead: false, status: null });
         expect(readFileSync(stderrPath, "utf8")).toBe("");
 

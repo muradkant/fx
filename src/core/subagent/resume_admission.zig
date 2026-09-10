@@ -192,6 +192,18 @@ pub fn listActionableCatalog(
                 if (active_id) |active| if (std.mem.eql(u8, active, summary.id)) continue;
                 var copy = try session_summary_codec.cloneSessionSummary(alloc, summary);
                 errdefer copy.deinit(alloc);
+                if (copy.orchestration) |*binding| binding.deinit(alloc);
+                copy.orchestration = null;
+                copy.orchestration = store.readOrchestrationBinding(
+                    alloc,
+                    summary.id,
+                ) catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    else => blk: {
+                        copy.orchestration_binding_invalid = true;
+                        break :blk null;
+                    },
+                };
                 try catalog.summaries.append(alloc, copy);
             },
             .excluded, .legacy_ranking => {},

@@ -72,6 +72,7 @@ pub fn buildRequest(
     request: stream_provider.RequestData,
     spec: *const Spec,
 ) ![]u8 {
+    try request.validatePrompt();
     try validateModel(request.model, spec);
     if (request.budget) |budget| {
         if (budget.cancel_flag) |flag| if (flag.load(.seq_cst)) return error.Cancelled;
@@ -85,7 +86,7 @@ pub fn buildRequest(
     try writer.writeAll("{\"model\":");
     try std.json.Stringify.value(wire_model, .{}, writer);
     try writer.writeAll(",\"messages\":[");
-    try writeMessages(writer, alloc, request.messages, request.verified_images);
+    try writeMessages(writer, alloc, request.instructions, request.messages, request.verified_images);
     try writer.writeAll("],\"stream\":true,\"stream_options\":{\"include_usage\":true}");
 
     const tool_count = try writeTools(writer, alloc, request.tools, request.vision_mode);
@@ -125,13 +126,34 @@ pub fn buildRequest(
     return out.toOwnedSlice();
 }
 
+fn writeInstructions(
+    writer: *std.Io.Writer,
+    alloc: Allocator,
+    instructions: []const types.ChatMessage,
+) !bool {
+    var joined: std.Io.Writer.Allocating = .init(alloc);
+    defer joined.deinit();
+    for (instructions) |instruction| {
+        const content = instruction.content orelse continue;
+        if (content.len == 0) continue;
+        if (joined.written().len > 0) try joined.writer.writeAll("\n\n");
+        try joined.writer.writeAll(content);
+    }
+    if (joined.written().len == 0) return false;
+    try writer.writeAll("{\"role\":\"system\",\"content\":");
+    try std.json.Stringify.value(joined.written(), .{}, writer);
+    try writer.writeByte('}');
+    return true;
+}
+
 fn writeMessages(
     writer: *std.Io.Writer,
     alloc: Allocator,
+    instructions: []const types.ChatMessage,
     messages: []const types.ChatMessage,
     verified_images: ?[]const image_attachments.VerifiedSnapshot,
 ) !void {
-    var first = true;
+    var first = !try writeInstructions(writer, alloc, instructions);
     var last_user_index: ?usize = null;
     for (messages, 0..) |message, index| {
         if (message.role == .user) last_user_index = index;
@@ -994,24 +1016,69 @@ test "OpenCode usage-limit error types disable transient retries" {
 }
 
 test "buildRequest emits chat-completions wire for text conversation" {
-    const messages = [_]types.ChatMessage{
+    const instructions = [_]types.ChatMessage{
         .{ .role = .system, .content = "be brief" },
+    };
+    const messages = [_]types.ChatMessage{
         .{ .role = .user, .content = "hello" },
         .{ .role = .assistant, .content = "hi" },
         .{ .role = .user, .content = "bye" },
     };
     const body = try buildRequest(std.testing.allocator, .{
         .model = "go/kimi-k3",
+        .instructions = &instructions,
         .messages = &messages,
         .tool_choice = .auto,
         .provider_options = .{},
     }, &test_spec);
     defer std.testing.allocator.free(body);
     try std.testing.expect(std.mem.startsWith(u8, body, "{\"model\":\"kimi-k3\",\"messages\":["));
-    try std.testing.expect(std.mem.find(u8, body, "\"role\":\"system\",\"content\":\"be brief\"") != null);
+    try std.testing.expect(std.mem.find(u8, body, "{\"role\":\"system\",\"content\":\"be brief\"},{\"role\":\"user\",\"content\":\"hello\"}") != null);
     try std.testing.expect(std.mem.find(u8, body, "\"role\":\"user\",\"content\":\"bye\"") != null);
     try std.testing.expect(std.mem.find(u8, body, "\"stream\":true,\"stream_options\":{\"include_usage\":true}") != null);
     try std.testing.expect(std.mem.find(u8, body, "\"tools\":") == null);
+}
+
+test "buildRequest merges instruction lanes ahead of the conversation" {
+    const instructions = [_]types.ChatMessage{
+        .{ .role = .system, .content = "stable prompt" },
+        .{ .role = .system, .content = "" },
+        .{ .role = .system, .content = "project context" },
+        .{ .role = .system, .content = "runtime overlay" },
+    };
+    const messages = [_]types.ChatMessage{.{ .role = .user, .content = "hello" }};
+    const body = try buildRequest(std.testing.allocator, .{
+        .model = "kimi-k3",
+        .instructions = &instructions,
+        .messages = &messages,
+        .tool_choice = .none,
+        .provider_options = .{},
+    }, &test_spec);
+    defer std.testing.allocator.free(body);
+    try std.testing.expect(std.mem.startsWith(u8, body, "{\"model\":\"kimi-k3\",\"messages\":[{\"role\":\"system\",\"content\":\"stable prompt\\n\\nproject context\\n\\nruntime overlay\"},{\"role\":\"user\",\"content\":\"hello\"}"));
+}
+
+test "buildRequest omits the system lane when only conversation messages exist" {
+    const messages = [_]types.ChatMessage{.{ .role = .user, .content = "hello" }};
+    const body = try buildRequest(std.testing.allocator, .{
+        .model = "kimi-k3",
+        .messages = &messages,
+        .tool_choice = .none,
+        .provider_options = .{},
+    }, &test_spec);
+    defer std.testing.allocator.free(body);
+    try std.testing.expect(std.mem.startsWith(u8, body, "{\"model\":\"kimi-k3\",\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}]"));
+    try std.testing.expect(std.mem.find(u8, body, "\"role\":\"system\"") == null);
+}
+
+test "buildRequest rejects system messages in the conversation lane" {
+    const messages = [_]types.ChatMessage{.{ .role = .system, .content = "wrong lane" }};
+    try std.testing.expectError(error.InvalidProviderPrompt, buildRequest(std.testing.allocator, .{
+        .model = "kimi-k3",
+        .messages = &messages,
+        .tool_choice = .none,
+        .provider_options = .{},
+    }, &test_spec));
 }
 
 test "buildRequest serializes assistant tool calls and tool results" {

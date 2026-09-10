@@ -1169,12 +1169,18 @@ const App = struct {
     pub fn collectPendingPromptCredential(
         self: *App,
     ) !app_auth_runtime.PendingPromptCredentialReadiness {
+        if (comptime build_options.orchestration_enabled) {
+            if (self.orchestration.active) return .current;
+        }
         return AuthAppRuntime.collectPendingPromptCredential(self);
     }
 
     pub fn retryPendingPromptCredential(
         self: *App,
     ) !app_auth_runtime.PendingPromptCredentialReadiness {
+        if (comptime build_options.orchestration_enabled) {
+            if (self.orchestration.active) return .current;
+        }
         return AuthAppRuntime.retryPendingPromptCredential(self);
     }
 
@@ -1913,7 +1919,7 @@ const App = struct {
         if (comptime !build_options.orchestration_enabled) return;
         try self.startPendingOrchestrationTurn();
         if (self.orchestration.active_source_turn_id != null) {
-            if (self.worker.isCancelRequested()) {
+            if (self.worker.cancellationStopsTurn()) {
                 _ = try self.cancelActiveOrchestrationTurn();
             } else {
                 try self.drainOrchestrationSteering();
@@ -1978,7 +1984,10 @@ const App = struct {
         const boundary = try self.worker.takeSteeringBoundary(
             std.heap.c_allocator,
             active_turn_id,
-            .model,
+            if (self.worker.isCancelRequested())
+                worker_runtime.SteeringBoundaryKind.cancelled
+            else
+                .model,
         );
         const messages = switch (boundary) {
             .continue_turn => |msgs| msgs,

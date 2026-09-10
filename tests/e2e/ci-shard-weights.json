@@ -37,7 +37,7 @@
   { "file": "tui-interrupt-recovery.test.ts", "weight": 9 },
   { "file": "tui-keybindings.test.ts", "weight": 1 },
   { "file": "tui-native-clear-recovery.test.ts", "weight": 4 },
-  { "file": "tui-orchestration-extension.test.ts", "weight": 1 },
+  { "file": "tui-orchestration-extension.test.ts", "weight": 40 },
   { "file": "tui-orchestration-live.test.ts", "weight": 1 },
   { "file": "tui-permissions.test.ts", "weight": 127 },
   { "file": "tui-performance.test.ts", "weight": 1 },
