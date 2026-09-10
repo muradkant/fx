@@ -22,6 +22,7 @@ const agent_execution_memory = @import("../core/agent/execution_memory.zig");
 const diff_mod = @import("../core/output/diff.zig");
 const file_mutation = @import("../core/tooling/file_mutation.zig");
 const file_mutation_contract = @import("../core/tooling/file_mutation_contract.zig");
+const web_backends = @import("../core/tooling/web_backends.zig");
 const mcp_runtime = @import("../core/mcp/mcp_runtime.zig");
 const mcp_model_catalog = @import("../core/mcp/model_catalog.zig");
 const mcp_elicitation = @import("../core/mcp/elicitation.zig");
@@ -313,18 +314,17 @@ const AcpContext = struct {
     fn toolContext(self: *AcpContext) tool_runtime.Context {
         const session = if (self.state.active_session) |*active| active else unreachable;
         const provider_capabilities = self.state.cfg.provider_set.select(session.provider).capabilities;
-        if (provider_capabilities.fx_search) {
-            self.state.web_search_runtime.configure(.{
-                .api_key = session.api_key,
-                .credential_source = session.credential_source,
-                .gateway_team = self.state.gateway_team,
-                .worker_model = session.model,
-                .gateway_retry_count = self.state.cfg.gateway_retry_count,
-                .gateway_chat_url = self.state.cfg.gateway_chat_url,
-                .usage = &session.session_rt.usage,
-                .usage_allocator = self.state.alloc,
-            });
-        }
+        const configured_backends = web_backends.configure(.{
+            .fx_search = provider_capabilities.fx_search,
+            .api_key = session.api_key,
+            .credential_source = session.credential_source,
+            .gateway_team = self.state.gateway_team,
+            .worker_model = session.model,
+            .gateway_retry_count = self.state.cfg.gateway_retry_count,
+            .gateway_chat_url = self.state.cfg.gateway_chat_url,
+            .usage = &session.session_rt.usage,
+            .usage_allocator = self.state.alloc,
+        }, .{ .web_search = &self.state.web_search_runtime });
         var tc: tool_runtime.Context = .{
             .workspace_root = self.state.workspace_root,
             .access_scope = self.state.workspace_access.scope(self.state.workspace_root),
@@ -388,8 +388,8 @@ const AcpContext = struct {
             .web_fetch_runtime = &self.state.web_fetch_runtime,
             .web_fetch_artifact_store = session.session_rt.webFetchArtifactStore(),
             .web_fetch_artifact_error = session.session_rt.webFetchArtifactError(),
-            .web_search_runtime_ready = false,
-            .web_search_backend = if (provider_capabilities.fx_search) self.state.web_search_runtime.dispatchBackend() else null,
+            .web_search_runtime_ready = configured_backends.web_search_runtime_ready,
+            .web_search_backend = configured_backends.web_search,
             .model_capability_resolver = .{
                 .ctx = @ptrCast(self),
                 .resolve_fn = resolveModelCapabilities,

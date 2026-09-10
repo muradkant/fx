@@ -936,10 +936,16 @@ function startFakeCline() {
         });
       }
       if (url.pathname === "/register") {
+        // Registration rotates the server-side session: a refreshed WorkOS
+        // token is re-registered and the response carries the rotated account
+        // token, which becomes the stored credential.
+        const posted = JSON.parse(body ?? "{}") as { accessToken?: string };
         return Response.json({
           success: true,
           data: {
-            accessToken: accountToken,
+            accessToken: posted.accessToken === refreshedAccountToken
+              ? refreshedAccountToken
+              : accountToken,
             refreshToken: "cline-account-refresh",
             tokenType: "Bearer",
             expiresAt: "2030-01-01T00:00:00.000Z",

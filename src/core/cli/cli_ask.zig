@@ -83,6 +83,7 @@ const skill_invocation = @import("../skills/skill_invocation.zig");
 const web_fetch_provider_runtime = @import("../tooling/web_fetch_provider_runtime.zig");
 const web_fetch_runtime = @import("../tooling/web_fetch_runtime.zig");
 const web_search_runtime = @import("../tooling/web_search_runtime.zig");
+const web_backends = @import("../tooling/web_backends.zig");
 const types = @import("../shared/types.zig");
 const worker_runtime = @import("../agent/worker_runtime.zig");
 const ask_presentation = @import("../../ui/ask_presentation.zig");
@@ -975,40 +976,25 @@ const AskContext = struct {
 
     fn toolContext(self: *AskContext) tool_runtime.Context {
         const provider_capabilities = self.cfg.provider_set.select(self.provider).capabilities;
-        var web_search_runtime_ready = false;
-        var web_search_backend: ?tool_dispatch.WebSearchBackend = null;
-        var web_fetch_backend: ?tool_dispatch.WebFetchBackend = null;
-        if (provider_capabilities.fx_search) {
-            self.web_search_runtime.configure(.{
-                .api_key = self.api_key,
-                .credential_source = self.credential_source,
-                .gateway_team = self.gateway_team,
-                .worker_model = self.model,
-                .gateway_retry_count = self.cfg.gateway_retry_count,
-                .gateway_chat_url = self.cfg.gateway_chat_url,
-                .usage = &self.session.usage,
-                .usage_allocator = self.alloc,
-            });
-            web_search_backend = self.web_search_runtime.dispatchBackend();
-        } else if (self.parallel_connection) |*connection| {
-            self.parallel_web_fetch_runtime.configure(.{
-                .api_key = connection.api_key,
-                .worker_model = self.model,
-                .usage = &self.session.usage,
-                .usage_allocator = self.alloc,
-            });
-            self.parallel_web_search_runtime.configure(.{
-                .api_key = connection.api_key,
-                .worker_model = self.model,
-                .gateway_retry_count = 0,
-                .gateway_chat_url = "",
-                .usage = &self.session.usage,
-                .usage_allocator = self.alloc,
-            });
-            web_search_runtime_ready = true;
-            web_search_backend = self.parallel_web_search_runtime.dispatchBackend();
-            web_fetch_backend = self.parallel_web_fetch_runtime.dispatchBackend();
-        }
+        const configured_backends = web_backends.configure(.{
+            .fx_search = provider_capabilities.fx_search,
+            .api_key = self.api_key,
+            .credential_source = self.credential_source,
+            .gateway_team = self.gateway_team,
+            .worker_model = self.model,
+            .gateway_retry_count = self.cfg.gateway_retry_count,
+            .gateway_chat_url = self.cfg.gateway_chat_url,
+            .usage = &self.session.usage,
+            .usage_allocator = self.alloc,
+            .parallel_api_key = if (self.parallel_connection) |*connection| connection.api_key else null,
+        }, .{
+            .web_search = &self.web_search_runtime,
+            .parallel_web_search = &self.parallel_web_search_runtime,
+            .parallel_web_fetch = &self.parallel_web_fetch_runtime,
+        });
+        const web_search_runtime_ready = configured_backends.web_search_runtime_ready;
+        const web_search_backend = configured_backends.web_search;
+        const web_fetch_backend = configured_backends.web_fetch;
         var tc: tool_runtime.Context = .{
             .workspace_root = self.workspace_root,
             .access_scope = self.workspace_access.scope(self.workspace_root),

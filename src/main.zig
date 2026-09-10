@@ -26,6 +26,10 @@ const orchestration_definition_manager = if (build_options.orchestration_enabled
     @import("core/orchestration/definition_manager.zig")
 else
     struct {};
+const orchestration_agent_run_app_runtime = if (build_options.orchestration_enabled)
+    @import("core/orchestration/agent_run_app_runtime.zig")
+else
+    struct {};
 
 comptime {
     if (build_options.orchestration_enabled) {
@@ -211,6 +215,7 @@ const tool_runtime = @import("core/tooling/tool_runtime.zig");
 const web_fetch_provider_runtime = @import("core/tooling/web_fetch_provider_runtime.zig");
 const web_fetch_runtime = @import("core/tooling/web_fetch_runtime.zig");
 const web_search_runtime = @import("core/tooling/web_search_runtime.zig");
+const web_backends = @import("core/tooling/web_backends.zig");
 const parallel_session = @import("core/auth/parallel_session.zig");
 const builtin_parallel = @import("builtins/parallel.zig");
 const worker_runtime = @import("core/agent/worker_runtime.zig");
@@ -272,11 +277,11 @@ const max_transcript_bytes: usize = 256 * 1024;
 const default_max_agent_steps: usize = agent_steps.default_max_agent_steps;
 const native_gateway_provider = builtin_gateway.provider;
 const max_history_turns: usize = 8;
-const max_list_entries: usize = 100;
-const max_read_file_bytes: usize = 50 * 1024;
-const max_read_file_lines: usize = 400;
-const max_read_file_line_len: usize = 2000;
-const max_command_output_bytes: usize = 64 * 1024;
+const max_list_entries: usize = tool_dispatch.default_max_list_entries;
+const max_read_file_bytes: usize = tool_dispatch.default_max_read_file_bytes;
+const max_read_file_lines: usize = tool_dispatch.default_max_read_file_lines;
+const max_read_file_line_len: usize = tool_dispatch.default_max_read_file_line_len;
+const max_command_output_bytes: usize = tool_dispatch.default_max_command_output_bytes;
 const input_escape_timeout_ms: i64 = 30;
 
 fn nativeLoopPollTimeoutMs(
@@ -295,80 +300,7 @@ fn nativeLoopPollTimeoutMs(
 
 const max_prompt_history: usize = 100;
 
-const ignored_list_entries = [_][]const u8{
-    ".git",
-    ".zig-cache",
-    "zig-out",
-    "node_modules",
-    ".next",
-    "dist",
-    "build",
-    "coverage",
-};
-
-fn orchestrationModelId(
-    alloc: Allocator,
-    provider: model_provider.ProviderId,
-    route_raw: []const u8,
-    name_raw: []const u8,
-) ![]u8 {
-    const route = std.mem.trim(u8, route_raw, " \t\r\n");
-    const name = std.mem.trim(u8, name_raw, " \t\r\n");
-    if (!validOrchestrationModelComponent(route) or
-        !validOrchestrationModelComponent(name))
-    {
-        return error.InvalidOrchestrationModelIdentity;
-    }
-    return switch (provider) {
-        .opencode => if (std.ascii.eqlIgnoreCase(route, "zen"))
-            alloc.dupe(u8, name)
-        else if (std.ascii.eqlIgnoreCase(route, "go"))
-            std.fmt.allocPrint(alloc, "go/{s}", .{name})
-        else
-            error.InvalidOpenCodeRoute,
-        .cline => std.fmt.allocPrint(alloc, "{s}/{s}", .{ route, name }),
-        .gateway => std.fmt.allocPrint(alloc, "{s}/{s}", .{ route, name }),
-        .codex, .grok => error.OrchestrationProviderNotUnified,
-    };
-}
-
-test "ALT preserves complete Cline model identities" {
-    const free = try orchestrationModelId(std.testing.allocator, .cline, "z-ai", "glm-5.3-flash");
-    defer std.testing.allocator.free(free);
-    try std.testing.expectEqualStrings("z-ai/glm-5.3-flash", free);
-
-    const cline_pass = try orchestrationModelId(std.testing.allocator, .cline, "cline-pass", "kimi-k3");
-    defer std.testing.allocator.free(cline_pass);
-    try std.testing.expectEqualStrings("cline-pass/kimi-k3", cline_pass);
-}
-
-fn validOrchestrationModelComponent(value: []const u8) bool {
-    if (value.len == 0 or value.len > 256) return false;
-    for (value) |byte| {
-        if (byte <= 0x20 or byte == 0x7f) return false;
-    }
-    return true;
-}
-
-fn orchestrationPromptOverlay(
-    alloc: Allocator,
-    base: ?[]const u8,
-    role_prompt: []const u8,
-    supplemental_context: []const u8,
-) ![]u8 {
-    var out: std.Io.Writer.Allocating = .init(alloc);
-    errdefer out.deinit();
-    const writer = &out.writer;
-    var wrote = false;
-    for ([_][]const u8{ base orelse "", role_prompt, supplemental_context }) |section| {
-        const trimmed = std.mem.trim(u8, section, " \t\r\n");
-        if (trimmed.len == 0) continue;
-        if (wrote) try writer.writeAll("\n\n");
-        try writer.writeAll(trimmed);
-        wrote = true;
-    }
-    return out.toOwnedSlice();
-}
+const ignored_list_entries = tool_dispatch.default_ignored_list_entries;
 
 fn dupeUniqueSkillBindingsFromTokens(
     alloc: Allocator,
@@ -1506,314 +1438,9 @@ const App = struct {
         self: *App,
         request: OrchestrationAgentRunRequest,
     ) !void {
-        if (comptime !build_options.orchestration_enabled) return;
-        if (!self.orchestration.active) return error.OrchestrationModeInactive;
-        if (self.orchestration.active_source_turn_id != request.authority.source_turn_id) {
-            return error.OrchestrationAuthorityMismatch;
+        if (comptime build_options.orchestration_enabled) {
+            return orchestration_agent_run_app_runtime.start(orchestration_host, Self, self, request);
         }
-        if (!std.mem.eql(
-            u64,
-            self.orchestration.instruction_source_turn_ids.items,
-            request.authority.instruction_source_turn_ids,
-        )) {
-            return error.OrchestrationInstructionAuthorityMismatch;
-        }
-        switch (request.scope) {
-            .specialist => if (request.context_key != null) {
-                return error.StatefulOrchestrationSpecialist;
-            },
-            .leader, .peer => if (request.context_key == null or request.context_key.?.len == 0) {
-                return error.MissingOrchestrationContextKey;
-            },
-        }
-        if (request.context_key != null and request.visible_input == .projected) {
-            return error.ContextBearingProjectedInput;
-        }
-        const provider = provider_catalog.parse(request.model.provider_id) orelse
-            return error.UnknownOrchestrationProvider;
-        if (provider_catalog.find(provider).catalog_scope != .unified) {
-            return error.OrchestrationProviderNotUnified;
-        }
-
-        var prompt = switch (request.visible_input) {
-            .canonical_turn => try self.orchestration.canonical_turns.cloneCanonical(
-                self.alloc,
-                request.authority.source_turn_id,
-                request.authority.instruction_source_turn_ids,
-            ),
-            .projected => |projected| try self.orchestration.canonical_turns.cloneProjected(
-                self.alloc,
-                request.authority.source_turn_id,
-                request.authority.instruction_source_turn_ids,
-                projected.content,
-                projected.attachment_references,
-            ),
-        };
-        var owns_prompt = true;
-        errdefer if (owns_prompt) worker_runtime.freeQueuedPrompt(self.alloc, prompt);
-        const supplemental_context = switch (request.visible_input) {
-            .canonical_turn => |canonical| canonical.supplemental_context,
-            .projected => "",
-        };
-        const continued_context = if (request.context_key) |key|
-            try self.orchestration.runs.attachContextSurface(
-                self.alloc,
-                key,
-                request.authority.source_turn_id,
-                request.authority.instruction_source_turn_ids,
-                supplemental_context,
-                &prompt,
-            )
-        else
-            false;
-
-        // Canonical projections deliberately discard the root worker's turn
-        // identity. Rebind this isolated worker to fx's opaque custody ID so
-        // its permission, question, cancellation, and activity snapshots have
-        // a stable nonzero lifecycle key without reviving root-worker state.
-        prompt.turn_id = request.authority.source_turn_id;
-
-        try self.routeOrchestrationCredential(&prompt, provider);
-        const exact_model = try orchestrationModelId(
-            self.alloc,
-            provider,
-            request.model.route,
-            request.model.name,
-        );
-        self.alloc.free(prompt.model);
-        prompt.model = exact_model;
-        prompt.provider = provider;
-        prompt.agent_settings.effort = .auto;
-        if (request.model.reasoning_effort) |raw_effort| {
-            prompt.agent_settings.effort = ReasoningEffort.parse(raw_effort) orelse
-                return error.InvalidOrchestrationReasoningEffort;
-        }
-
-        var projection = try self.snapshotModelToolProjectionForProvider(
-            self.alloc,
-            prompt.permission_mode,
-            provider,
-        );
-        var owns_projection = true;
-        errdefer if (owns_projection) projection.deinit(self.alloc);
-        debug_trace.eventf(
-            "orchestration",
-            "agent_run_host_admitted",
-            .{},
-            "run={s} provider={s} model={s} tool_count={d} write_file={s} native_subagent={s} structured_outcome={s}",
-            .{
-                request.run_id,
-                request.model.provider_id,
-                prompt.model,
-                projection.advertised_names.len,
-                if (tool_projection.containsName(projection.advertised_names, "write_file")) "advertised" else "absent",
-                if (tool_projection.containsName(projection.advertised_names, "subagent")) "advertised" else "absent",
-                if (request.response_schema_json != null) "enabled" else "disabled",
-            },
-        );
-        var permission_rules = try types.dupePermissionRuleSet(
-            self.alloc,
-            self.permission_engine.rules,
-        );
-        var owns_permission_rules = true;
-        errdefer if (owns_permission_rules) permission_rules.deinit(self.alloc);
-
-        var tool_context = AgentAppRuntime.toolContext(
-            self,
-            &ignored_list_entries,
-            max_list_entries,
-            max_read_file_bytes,
-            max_read_file_lines,
-            max_read_file_line_len,
-            max_command_output_bytes,
-            builtin_gateway.retry_count,
-            builtin_gateway.defaultChatUrl(),
-        );
-        const bundle = self.providerSet().select(provider);
-        tool_context.agent_stream_provider = bundle.agent_stream_or_unavailable();
-        tool_context.provider = provider;
-        tool_context.provider_capabilities = bundle.capabilities;
-        tool_context.model = prompt.model;
-        tool_context.api_key = prompt.api_key;
-        tool_context.gateway_team = prompt.gateway_team;
-        tool_context.credential_source = prompt.credential_source;
-        tool_context.account_id = prompt.account_id;
-        tool_context.permission_mode = prompt.permission_mode;
-        tool_context.permission_grants = prompt.grants;
-        tool_context.permission_rules = permission_rules;
-        tool_context.subagent_host = null;
-        tool_context.subagent_caller_id = null;
-        if (bundle.capabilities.fx_search) {
-            self.web_search_runtime.configure(.{
-                .api_key = prompt.api_key,
-                .credential_source = prompt.credential_source,
-                .gateway_team = prompt.gateway_team,
-                .worker_model = prompt.model,
-                .gateway_retry_count = builtin_gateway.retry_count,
-                .gateway_chat_url = builtin_gateway.defaultChatUrl(),
-                .usage = &self.session.usage,
-                .usage_allocator = self.alloc,
-            });
-            tool_context.web_search_backend = self.web_search_runtime.dispatchBackend();
-            tool_context.web_search_runtime_ready = false;
-        } else if (self.parallel_connection) |*connection| {
-            self.parallel_web_fetch_runtime.configure(.{
-                .api_key = connection.api_key,
-                .worker_model = prompt.model,
-                .usage = &self.session.usage,
-                .usage_allocator = self.alloc,
-            });
-            self.parallel_web_search_runtime.configure(.{
-                .api_key = connection.api_key,
-                .worker_model = prompt.model,
-                .gateway_retry_count = 0,
-                .gateway_chat_url = "",
-                .usage = &self.session.usage,
-                .usage_allocator = self.alloc,
-            });
-            tool_context.web_search_backend = self.parallel_web_search_runtime.dispatchBackend();
-            tool_context.web_fetch_backend = self.parallel_web_fetch_runtime.dispatchBackend();
-            tool_context.web_search_runtime_ready = true;
-        } else {
-            tool_context.web_search_backend = null;
-            tool_context.web_search_runtime_ready = false;
-        }
-        if (request.visible_input == .projected) {
-            tool_context.context_enabled = false;
-        }
-
-        const policy_snapshot = self.promptPolicy();
-        var strings_transferred = false;
-        const system_prompt = try self.alloc.dupe(u8, policy_snapshot.system_prompt);
-        errdefer if (!strings_transferred) self.alloc.free(system_prompt);
-        const model_prompt_overlay = try orchestrationPromptOverlay(
-            self.alloc,
-            policy_snapshot.modelPromptOverlay(prompt.model),
-            request.system_prompt,
-            if (continued_context) "" else supplemental_context,
-        );
-        errdefer if (!strings_transferred) self.alloc.free(model_prompt_overlay);
-
-        const skills_prompt_section: []u8 = &.{};
-        var explicit_skills_prompt_section: []u8 = &.{};
-        if (request.visible_input == .canonical_turn) {
-            // Routed skill mentions are no longer injected as prompt text;
-            // the advertised skill catalog and the skill tool load them.
-            const explicit_bindings = try self.alloc.alloc(
-                skill_invocation.ExplicitBinding,
-                prompt.skill_bindings.len,
-            );
-            defer self.alloc.free(explicit_bindings);
-            for (prompt.skill_bindings, 0..) |binding, index| {
-                explicit_bindings[index] = .{
-                    .name = binding.name,
-                    .path = binding.path,
-                };
-            }
-            var explicit = try skill_invocation.buildExplicitPromptSection(
-                self.alloc,
-                .{
-                    .skills = self.skills.items,
-                    .diagnostics = self.skills.diagnostics,
-                },
-                prompt.prompt,
-                explicit_bindings,
-                self.context_limits,
-                null,
-            );
-            defer explicit.deinit(self.alloc);
-            explicit_skills_prompt_section = try self.alloc.dupe(
-                u8,
-                explicit.text,
-            );
-            errdefer if (!strings_transferred) self.alloc.free(explicit_skills_prompt_section);
-        }
-
-        const run_id = try self.alloc.dupe(u8, request.run_id);
-        errdefer if (!strings_transferred) self.alloc.free(run_id);
-        const context_key = if (request.context_key) |key|
-            try self.alloc.dupe(u8, key)
-        else
-            null;
-        errdefer if (!strings_transferred) {
-            if (context_key) |key| self.alloc.free(key);
-        };
-        const instruction_source_turn_ids = try self.alloc.dupe(
-            u64,
-            request.authority.instruction_source_turn_ids,
-        );
-        errdefer if (!strings_transferred) self.alloc.free(instruction_source_turn_ids);
-        const response_schema_json = if (request.response_schema_json) |schema|
-            try self.alloc.dupe(u8, schema)
-        else
-            null;
-        errdefer if (!strings_transferred) {
-            if (response_schema_json) |schema| self.alloc.free(schema);
-        };
-        const lifecycle_session_id = try self.alloc.dupe(u8, request.run_id);
-        errdefer if (!strings_transferred) self.alloc.free(lifecycle_session_id);
-
-        var owned_prepared = orchestration_run_manager.Prepared{
-            .run_id = run_id,
-            .context_key = context_key,
-            .source_turn_id = request.authority.source_turn_id,
-            .instruction_source_turn_ids = instruction_source_turn_ids,
-            .prompt = prompt,
-            .tool_context = tool_context,
-            .tool_projection = projection,
-            .permission_rules = permission_rules,
-            .system_prompt = system_prompt,
-            .model_prompt_overlay = model_prompt_overlay,
-            .skills_prompt_section = skills_prompt_section,
-            .explicit_skills_prompt_section = explicit_skills_prompt_section,
-            .response_schema_json = response_schema_json,
-            .lifecycle_session_id = lifecycle_session_id,
-        };
-        var owns_prepared = true;
-        errdefer if (owns_prepared) owned_prepared.deinit(self.alloc);
-        owns_prompt = false;
-        owns_projection = false;
-        owns_permission_rules = false;
-        strings_transferred = true;
-        try self.orchestration.runs.start(owned_prepared);
-        owns_prepared = false;
-    }
-
-    fn routeOrchestrationCredential(
-        self: *App,
-        prompt: *worker_runtime.QueuedPrompt,
-        provider: model_provider.ProviderId,
-    ) !void {
-        if (model_provider.authorizesCredential(provider, prompt.credential_source)) return;
-        const resolution = try credentials.resolveForProvider(
-            self.alloc,
-            self.auth.oauthTransport(),
-            self.auth.secretStore(),
-            .refresh_if_needed,
-            provider,
-            prompt.credential_source,
-        );
-        var credential = resolution.credential orelse return error.OrchestrationCredentialMissing;
-        defer credential.deinit(self.alloc);
-        const token = try self.alloc.dupe(u8, credential.token);
-        errdefer secret.zeroAndFree(self.alloc, token);
-        const gateway_team = if (credential.gatewayTeam()) |team|
-            try self.alloc.dupe(u8, team)
-        else
-            null;
-        errdefer if (gateway_team) |team| self.alloc.free(team);
-        const account_id = if (credential.accountId()) |id|
-            try self.alloc.dupe(u8, id)
-        else
-            null;
-
-        secret.zeroAndFree(self.alloc, prompt.api_key);
-        if (prompt.gateway_team) |team| self.alloc.free(team);
-        if (prompt.account_id) |id| self.alloc.free(id);
-        prompt.api_key = token;
-        prompt.gateway_team = gateway_team;
-        prompt.account_id = account_id;
-        prompt.credential_source = credential.source;
     }
 
     pub fn snapshotOrchestrationApproval(

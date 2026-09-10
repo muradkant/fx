@@ -50,6 +50,7 @@ pub const default_max_list_entries: usize = 100;
 pub const default_max_read_file_bytes: usize = 50 * 1024;
 pub const default_max_read_file_lines: usize = 400;
 pub const default_max_read_file_line_len: usize = 2000;
+pub const default_max_command_output_bytes: usize = 64 * 1024;
 
 pub const web_search_unavailable_message = "web_search is unavailable: no local runtime with a configured Gateway transport policy is installed";
 pub const web_fetch_unavailable_message = "web_fetch is unavailable: no local WebFetch runtime is installed";

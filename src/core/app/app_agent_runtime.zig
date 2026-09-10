@@ -54,6 +54,7 @@ const tool_runtime = @import("../tooling/tool_runtime.zig");
 const skill_invocation = @import("../skills/skill_invocation.zig");
 const web_fetch_runtime = @import("../tooling/web_fetch_runtime.zig");
 const web_search_runtime = @import("../tooling/web_search_runtime.zig");
+const web_backends = @import("../tooling/web_backends.zig");
 const types = @import("../shared/types.zig");
 const worker_runtime = @import("../agent/worker_runtime.zig");
 const workspace_access = @import("../workspace/workspace_access.zig");
@@ -311,42 +312,35 @@ pub fn Runtime(comptime App: type) type {
                 ctx.on_web_fetch_progress = app_callbacks.Bindings(App).onWebFetchProgress;
             }
             if (comptime @hasField(App, "web_search_runtime")) {
-                if (provider_capabilities.fx_search) {
-                    app.web_search_runtime.configure(.{
-                        .api_key = app.auth.apiKey() orelse "",
-                        .credential_source = app.auth.credentialSource(),
-                        .gateway_team = app.auth.gatewayTeam(),
-                        .worker_model = provider_runtime.model(app),
-                        .gateway_retry_count = gateway_retry_count,
-                        .gateway_chat_url = gateway_chat_url,
-                        .usage = &app.session.usage,
-                        .usage_allocator = app.alloc,
-                    });
-                    ctx.web_search_backend = app.web_search_runtime.dispatchBackend();
-                    ctx.web_search_runtime_ready = false;
-                } else if (comptime @hasField(App, "parallel_web_search_runtime") and @hasField(App, "parallel_connection")) {
-                    if (app.parallel_connection) |*connection| {
-                        if (comptime @hasField(App, "parallel_web_fetch_runtime")) {
-                            app.parallel_web_fetch_runtime.configure(.{
-                                .api_key = connection.api_key,
-                                .worker_model = provider_runtime.model(app),
-                                .usage = &app.session.usage,
-                                .usage_allocator = app.alloc,
-                            });
-                            ctx.web_fetch_backend = app.parallel_web_fetch_runtime.dispatchBackend();
-                        }
-                        app.parallel_web_search_runtime.configure(.{
-                            .api_key = connection.api_key,
-                            .worker_model = provider_runtime.model(app),
-                            .gateway_retry_count = 0,
-                            .gateway_chat_url = "",
-                            .usage = &app.session.usage,
-                            .usage_allocator = app.alloc,
-                        });
-                        ctx.web_search_backend = app.parallel_web_search_runtime.dispatchBackend();
-                        ctx.web_search_runtime_ready = true;
-                    }
-                }
+                const configured_backends = web_backends.configure(.{
+                    .fx_search = provider_capabilities.fx_search,
+                    .api_key = app.auth.apiKey() orelse "",
+                    .credential_source = app.auth.credentialSource(),
+                    .gateway_team = app.auth.gatewayTeam(),
+                    .worker_model = provider_runtime.model(app),
+                    .gateway_retry_count = gateway_retry_count,
+                    .gateway_chat_url = gateway_chat_url,
+                    .usage = &app.session.usage,
+                    .usage_allocator = app.alloc,
+                    .parallel_api_key = blk: {
+                        if (comptime !@hasField(App, "parallel_connection")) break :blk null;
+                        const connection = app.parallel_connection orelse break :blk null;
+                        break :blk connection.api_key;
+                    },
+                }, .{
+                    .web_search = &app.web_search_runtime,
+                    .parallel_web_search = if (comptime @hasField(App, "parallel_web_search_runtime"))
+                        &app.parallel_web_search_runtime
+                    else
+                        null,
+                    .parallel_web_fetch = if (comptime @hasField(App, "parallel_web_fetch_runtime"))
+                        &app.parallel_web_fetch_runtime
+                    else
+                        null,
+                });
+                ctx.web_search_backend = configured_backends.web_search;
+                ctx.web_fetch_backend = configured_backends.web_fetch;
+                ctx.web_search_runtime_ready = configured_backends.web_search_runtime_ready;
                 ctx.web_search_progress_ctx = @ptrCast(app);
                 ctx.on_web_search_progress = app_callbacks.Bindings(App).onWebSearchProgress;
             }
@@ -809,7 +803,8 @@ pub fn Runtime(comptime App: type) type {
             ctx.gateway_team = credential.tenant();
             if (comptime @hasField(App, "web_search_runtime") and @hasField(App, "session")) {
                 if (ctx.provider_capabilities.fx_search) {
-                    app.web_search_runtime.configure(.{
+                    const configured_backends = web_backends.configure(.{
+                        .fx_search = true,
                         .api_key = credential_secret,
                         .credential_source = credential_source,
                         .gateway_team = credential.tenant(),
@@ -818,8 +813,8 @@ pub fn Runtime(comptime App: type) type {
                         .gateway_chat_url = gateway_chat_url,
                         .usage = &app.session.usage,
                         .usage_allocator = app.alloc,
-                    });
-                    ctx.web_search_backend = app.web_search_runtime.dispatchBackend();
+                    }, .{ .web_search = &app.web_search_runtime });
+                    ctx.web_search_backend = configured_backends.web_search;
                 }
             }
         }
