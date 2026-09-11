@@ -597,7 +597,11 @@ describe.skipIf(SKIP)("tui: orchestration extension host", () => {
         await choose("Save & start");
         await active.waitForText("ALT mode enabled.", 5_000);
         const teamsRoot = join(home, ".fx", "extensions", "alt", "teams");
-        const teamId = readdirSync(teamsRoot)[0]!;
+        const teamIds = readdirSync(teamsRoot, { withFileTypes: true })
+          .filter((entry) => entry.isDirectory())
+          .map((entry) => entry.name);
+        expect(teamIds).toHaveLength(1);
+        const teamId = teamIds[0]!;
         const manifest = JSON.parse(readFileSync(join(teamsRoot, teamId, "manifest.json"), "utf8"));
         const saved = JSON.parse(readFileSync(join(teamsRoot, teamId, `1-${manifest.latest_digest}.json`), "utf8"));
         expect(saved.peers).toHaveLength(2);
