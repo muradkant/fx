@@ -41,6 +41,9 @@ pub const Prepared = struct {
     explicit_skills_prompt_section: []u8,
     response_schema_json: ?[]u8,
     lifecycle_session_id: []u8,
+    /// Live host worker receiving the run's presentation stream. Borrowed:
+    /// it outlives the run. Null keeps the run capture-only.
+    live_worker: ?*worker_runtime.WorkerRuntime = null,
 
     pub fn deinit(self: *Prepared, alloc: Allocator) void {
         alloc.free(self.run_id);
@@ -160,6 +163,7 @@ const Run = struct {
             .advertised_functions = self.prepared.tool_projection.advertised_functions,
             .custom_tool_guidance = self.prepared.tool_projection.custom_guidance,
             .response_schema_json = self.prepared.response_schema_json,
+            .live_worker = self.prepared.live_worker,
         }, &self.prepared.prompt, &self.cancel) catch |err| {
             self.manager.pushFailed(
                 self.prepared.run_id,

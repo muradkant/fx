@@ -1507,6 +1507,7 @@ const App = struct {
             .policy = self.promptPolicy(),
             .skills = .{ .skills = self.skills.items, .diagnostics = self.skills.diagnostics },
             .context_limits = self.context_limits,
+            .live_worker = &self.worker,
         };
     }
 

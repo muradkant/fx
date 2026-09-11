@@ -175,7 +175,7 @@ Return to native fx without leaving the application:
 /fixer off
 ```
 
-Every user turn in Fixer mode enters through the Team's configured primary peer. Exactly one peer holds leadership at a time and may answer, hand leadership to an authorized peer, or coordinate Team work.
+Every user turn in Fixer mode enters through the Team's configured primary peer. Exactly one peer holds leadership at a time and may answer, hand leadership to an authorized peer, or coordinate Team work. Each run streams natively into the transcript as it works: assistant output, tool activity, diffs, command output, and notices appear live beneath the notice naming the model handling the request.
 
 ```mermaid
 flowchart TD

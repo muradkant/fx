@@ -136,6 +136,9 @@ pub fn Services(comptime Host: type) type {
         skills: skill_invocation.Catalog,
         /// Context limits for skill section budgets.
         context_limits: config_runtime.context_limits.Values,
+        /// Live host worker receiving the run's presentation stream.
+        /// Borrowed from the app; null keeps the run capture-only.
+        live_worker: ?*worker_runtime.WorkerRuntime = null,
 
         /// Frees the owned permission-rule snapshot unless `start` moved it
         /// into the prepared run. Every other field is borrowed.
@@ -419,6 +422,7 @@ pub fn start(
         .explicit_skills_prompt_section = explicit_skills_prompt_section,
         .response_schema_json = response_schema_json,
         .lifecycle_session_id = lifecycle_session_id,
+        .live_worker = services.live_worker,
     };
     var owns_prepared = true;
     errdefer if (owns_prepared) owned_prepared.deinit(services.alloc);

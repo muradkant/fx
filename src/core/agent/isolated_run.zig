@@ -34,6 +34,12 @@ pub const Config = struct {
     advertised_functions: []const @import("../tooling/model_tool_schema.zig").FunctionSchema = &.{},
     custom_tool_guidance: []const u8 = "",
     response_schema_json: ?[]const u8 = null,
+    /// Live host worker receiving the run's presentation stream. When set,
+    /// assistant text, tool lifecycle, diffs, notices, and command output
+    /// are forwarded into its event queue exactly as native turns emit
+    /// them; control and transient turn-scoped events stay dropped. Null
+    /// preserves the previous capture-only behavior.
+    live_worker: ?*worker_runtime.WorkerRuntime = null,
 };
 
 pub const Result = struct {
@@ -85,7 +91,7 @@ const Context = struct {
         result.session_child_capability = null;
         result.interactive = true;
         result.output_chunk_ctx = self;
-        result.on_output_chunk = discardOutputChunk;
+        result.on_output_chunk = streamOutputChunk;
         result.lifecycle_view = self.config.lifecycle_view;
         result.lifecycle_scope = .{
             .kind = .interactive,
@@ -203,12 +209,13 @@ fn runtimeDeps(context: *Context) agent_runtime.AgentRuntimeDeps {
         .publish_committed_file_handoff = publishCommittedFileHandoff,
         .propagate_history_turn = propagateHistoryTurn,
         .propagate_grant = discardGrant,
-        .push_event = discardWorkerEvent,
+        .push_event = pushStreamEvent,
         .push_text = captureText,
-        .push_diff_block = discardDiff,
-        .push_system_notice = discardNotice,
+        .push_tool_lifecycle = pushStreamToolLifecycle,
+        .push_diff_block = pushStreamDiff,
+        .push_system_notice = pushStreamNotice,
         .push_route_recovery_status = discardRouteRecoveryStatus,
-        .push_command_output_complete = discardCommandOutputComplete,
+        .push_command_output_complete = pushStreamCommandOutputComplete,
         .push_http_error = captureHttpError,
         .refresh_gateway_credential = refreshGatewayCredential,
         .format_tool_execution_error = formatToolExecutionError,
@@ -328,17 +335,108 @@ fn captureText(raw: *anyopaque, emission: agent_runtime.TextEmission) !void {
         .assistant_source => |text| try context.output.appendSlice(context.config.alloc, text),
         .assistant_started, .assistant_rendered, .assistant_restarted, .operational => {},
     }
+    if (context.config.live_worker) |live| try forwardStreamText(live, emission);
 }
 
-fn discardWorkerEvent(_: *anyopaque, event: worker_runtime.WorkerEvent) !void {
+fn pushStreamEvent(raw: *anyopaque, event: worker_runtime.WorkerEvent) !void {
+    const context: *Context = @ptrCast(@alignCast(raw));
+    if (context.config.live_worker) |live| return forwardStreamEvent(live, event);
     worker_runtime.freeWorkerEvent(std.heap.c_allocator, event);
 }
-fn discardDiff(_: *anyopaque, payload: agent_runtime.DiffEntryPayload) !void {
+
+fn pushStreamToolLifecycle(raw: *anyopaque, event: types.ToolLifecycleEvent) !void {
+    const context: *Context = @ptrCast(@alignCast(raw));
+    if (context.config.live_worker) |live| try forwardStreamToolLifecycle(live, event);
+}
+
+fn pushStreamDiff(raw: *anyopaque, payload: agent_runtime.DiffEntryPayload) !void {
+    const context: *Context = @ptrCast(@alignCast(raw));
+    if (context.config.live_worker) |live| return forwardStreamDiff(live, payload);
     diff_mod.freeDiffEntryPayload(std.heap.c_allocator, payload);
 }
-fn discardNotice(_: *anyopaque, _: []const u8) !void {}
+
+fn pushStreamNotice(raw: *anyopaque, text: []const u8) !void {
+    const context: *Context = @ptrCast(@alignCast(raw));
+    if (context.config.live_worker) |live| try forwardStreamNotice(live, text);
+}
+
+fn pushStreamCommandOutputComplete(raw: *anyopaque, lifecycle_id: ?types.ToolLifecycleId) !void {
+    const context: *Context = @ptrCast(@alignCast(raw));
+    if (context.config.live_worker) |live| try forwardStreamCommandOutputComplete(live, lifecycle_id);
+}
+
+fn streamOutputChunk(raw: *anyopaque, lifecycle_id: ?types.ToolLifecycleId, stream: @import("../tooling/command_output_content.zig").Stream, chunk: []const u8) anyerror!void {
+    const context: *Context = @ptrCast(@alignCast(raw));
+    if (context.config.live_worker) |live| try forwardStreamCommandOutput(live, lifecycle_id, stream, chunk);
+}
+
+/// Presentation-safe worker events forwarded from an isolated run into the
+/// host worker queue. Control, credential, grant, and transient turn-scoped
+/// events stay with the run: forwarding them would corrupt host turn state.
+/// New variants stay dropped by default until explicitly allowed here.
+fn streamsWorkerEvent(event: worker_runtime.WorkerEvent) bool {
+    return switch (event) {
+        .assistant_presentation,
+        .semantic_notice,
+        .error_text,
+        .command_output,
+        .command_output_complete,
+        .tool_lifecycle,
+        .diff_block,
+        => true,
+        else => false,
+    };
+}
+
+fn forwardStreamEvent(live: *worker_runtime.WorkerRuntime, event: worker_runtime.WorkerEvent) !void {
+    defer worker_runtime.freeWorkerEvent(std.heap.c_allocator, event);
+    if (!streamsWorkerEvent(event)) return;
+    try live.pushEvent(std.heap.c_allocator, event);
+}
+
+fn forwardStreamText(live: *worker_runtime.WorkerRuntime, emission: agent_runtime.TextEmission) !void {
+    // Mirrors agentPushText: only rendered output reaches the transcript.
+    const text = switch (emission) {
+        .assistant_rendered, .assistant_restarted, .operational => |bytes| bytes,
+        .assistant_started, .assistant_source => return,
+    };
+    try live.pushEvent(std.heap.c_allocator, .{ .assistant_presentation = .{ .text = @constCast(text) } });
+}
+
+fn forwardStreamToolLifecycle(live: *worker_runtime.WorkerRuntime, event: types.ToolLifecycleEvent) !void {
+    try live.pushEvent(std.heap.c_allocator, .{ .tool_lifecycle = event });
+}
+
+fn forwardStreamDiff(live: *worker_runtime.WorkerRuntime, payload: agent_runtime.DiffEntryPayload) !void {
+    live.pushOwnedEvent(std.heap.c_allocator, .{ .diff_block = payload }) catch |err| {
+        diff_mod.freeDiffEntryPayload(std.heap.c_allocator, payload);
+        return err;
+    };
+}
+
+fn forwardStreamNotice(live: *worker_runtime.WorkerRuntime, text: []const u8) !void {
+    // Mirrors agentPushSystemNotice.
+    try live.pushEvent(std.heap.c_allocator, .{ .semantic_notice = .{
+        .topic = @constCast("system"),
+        .tone = .neutral,
+        .body = @constCast(text),
+    } });
+}
+
+fn forwardStreamCommandOutput(live: *worker_runtime.WorkerRuntime, lifecycle_id: ?types.ToolLifecycleId, stream: @import("../tooling/command_output_content.zig").Stream, chunk: []const u8) !void {
+    if (chunk.len == 0) return;
+    try live.pushEvent(std.heap.c_allocator, .{ .command_output = .{
+        .lifecycle_id = lifecycle_id,
+        .stream = stream,
+        .text = @constCast(chunk),
+    } });
+}
+
+fn forwardStreamCommandOutputComplete(live: *worker_runtime.WorkerRuntime, lifecycle_id: ?types.ToolLifecycleId) !void {
+    try live.pushEvent(std.heap.c_allocator, .{ .command_output_complete = lifecycle_id });
+}
+
 fn discardRouteRecoveryStatus(_: *anyopaque, _: types.RouteRecoveryStatus) !void {}
-fn discardCommandOutputComplete(_: *anyopaque, _: ?types.ToolLifecycleId) !void {}
 fn captureHttpError(raw: *anyopaque, status: std.http.Status, detail: []const u8, credential_source: ?types.CredentialSource) !void {
     const context: *Context = @ptrCast(@alignCast(raw));
     const failure = try formatHttpFailure(context.config.alloc, status, detail, credential_source);
@@ -367,7 +465,6 @@ fn formatHttpFailure(
     };
 }
 fn discardGrant(_: *anyopaque, _: []const u8, _: []const u8) !void {}
-fn discardOutputChunk(_: *anyopaque, _: ?types.ToolLifecycleId, _: @import("../tooling/command_output_content.zig").Stream, _: []const u8) anyerror!void {}
 fn discardBackgroundUrl(_: *anyopaque, _: u64, _: []const u8) void {}
 
 fn publishCommittedFileHandoff(_: *anyopaque, _: file_mutation.CommittedFileHandoff) agent_runtime.SecondaryPublicationReport {
@@ -418,4 +515,29 @@ test "isolated service is independent of native subagent modules" {
     _ = Config;
     _ = Result;
     _ = run;
+}
+
+test "isolated live forwarding streams presentation and drops control events" {
+    var live: worker_runtime.WorkerRuntime = .{};
+    defer live.deinit(std.heap.c_allocator);
+
+    const owned_text = try std.heap.c_allocator.dupe(u8, "streamed");
+    try forwardStreamEvent(&live, .{ .assistant_presentation = .{ .text = owned_text } });
+    try forwardStreamText(&live, .{ .assistant_rendered = "rendered" });
+    try forwardStreamText(&live, .{ .assistant_source = "source stays captured" });
+    try forwardStreamNotice(&live, "note");
+    try forwardStreamCommandOutputComplete(&live, null);
+    try forwardStreamEvent(&live, .question_requested);
+    try forwardStreamEvent(&live, .open_model_picker);
+    try forwardStreamEvent(&live, .{ .begin_presented_prompt = 7 });
+    try forwardStreamEvent(&live, .{ .turn_token_update = .{ .input_tokens = 1, .output_tokens = 2 } });
+
+    const events = live.worker_events.items;
+    try std.testing.expectEqual(@as(usize, 4), events.len);
+    try std.testing.expectEqualStrings("streamed", events[0].assistant_presentation.text);
+    try std.testing.expect(events[0].assistant_presentation.text.ptr != owned_text.ptr);
+    try std.testing.expectEqualStrings("rendered", events[1].assistant_presentation.text);
+    try std.testing.expectEqualStrings("note", events[2].semantic_notice.body);
+    try std.testing.expect(events[3] == .command_output_complete);
+    try std.testing.expect(events[3].command_output_complete == null);
 }
