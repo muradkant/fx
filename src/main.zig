@@ -1439,8 +1439,75 @@ const App = struct {
         request: OrchestrationAgentRunRequest,
     ) !void {
         if (comptime build_options.orchestration_enabled) {
-            return orchestration_agent_run_app_runtime.start(orchestration_host, Self, self, request);
+            // Admission is validated before services are assembled: the
+            // tool-context base configures shared web runtimes, and a
+            // rejected request must not touch them. The orchestration
+            // module owns these admission rules.
+            try orchestration_agent_run_app_runtime.validateAdmission(
+                orchestration_host,
+                &self.orchestration,
+                request,
+            );
+            var services = try self.orchestrationRunServices();
+            defer services.deinit();
+            return orchestration_agent_run_app_runtime.start(orchestration_host, &services, request);
         }
+    }
+
+    /// Assembles the typed service contract for one orchestration agent-run
+    /// admission. Every field except the permission-rule snapshot is
+    /// borrowed from app-owned state; the snapshot is an owned copy captured
+    /// under the permission-authority lock so the run's projection and its
+    /// prepared rule set observe one consistent view.
+    fn orchestrationRunServices(
+        self: *App,
+    ) !orchestration_agent_run_app_runtime.Services(orchestration_host) {
+        const snapshot = blk: {
+            self.permission_state.authority_mutex.lockUncancelable(io_mod.getIo());
+            defer self.permission_state.authority_mutex.unlock(io_mod.getIo());
+            break :blk .{
+                .permission_rules = try types.dupePermissionRuleSet(
+                    self.alloc,
+                    self.permission_engine.rules,
+                ),
+                .tool_set = self.toolAdvertisementSet(),
+                .subagent_available = self.session_persistence.subagent_host != null and
+                    self.nativeSubagentsAvailable(),
+                .parallel_connected = self.parallel_connection != null,
+            };
+        };
+        return .{
+            .alloc = self.alloc,
+            .state = &self.orchestration,
+            .oauth_transport = self.auth.oauthTransport(),
+            .secret_store = self.auth.secretStore(),
+            .permission_rules = snapshot.permission_rules,
+            .tool_set = snapshot.tool_set,
+            .subagent_available = snapshot.subagent_available,
+            .tool_context_base = AgentAppRuntime.toolContext(
+                self,
+                &ignored_list_entries,
+                max_list_entries,
+                max_read_file_bytes,
+                max_read_file_lines,
+                max_read_file_line_len,
+                max_command_output_bytes,
+                builtin_gateway.retry_count,
+                builtin_gateway.defaultChatUrl(),
+            ),
+            .providers = self.providerSet(),
+            .usage = &self.session.usage,
+            .parallel_connected = snapshot.parallel_connected,
+            .parallel_api_key = if (self.parallel_connection) |*connection| connection.api_key else null,
+            .web = .{
+                .web_search = &self.web_search_runtime,
+                .parallel_web_search = &self.parallel_web_search_runtime,
+                .parallel_web_fetch = &self.parallel_web_fetch_runtime,
+            },
+            .policy = self.promptPolicy(),
+            .skills = .{ .skills = self.skills.items, .diagnostics = self.skills.diagnostics },
+            .context_limits = self.context_limits,
+        };
     }
 
     pub fn snapshotOrchestrationApproval(

@@ -1,16 +1,23 @@
 const std = @import("std");
-const app_agent_runtime = @import("../app/app_agent_runtime.zig");
+const orchestration_app_runtime = @import("app_runtime.zig");
 const worker_runtime = @import("../agent/worker_runtime.zig");
 const builtin_gateway = @import("../../builtins/gateway.zig");
 const credentials = @import("../auth/credentials.zig");
+const oauth_transport = @import("../auth/oauth_transport.zig");
 const provider_catalog = @import("../auth/provider_catalog.zig");
+const provider_set = @import("../gateway/provider_set.zig");
 const secret = @import("../auth/secret.zig");
+const host = @import("../hosts/host.zig");
 const skill_invocation = @import("../skills/skill_invocation.zig");
+const config_runtime = @import("../config/config_runtime.zig");
 const model_provider = @import("../config/model_provider.zig");
+const prompt_policy = @import("../config/prompt_policy.zig");
+const session_usage = @import("../session/session_usage.zig");
 const types = @import("../shared/types.zig");
 const debug_trace = @import("../shared/debug_trace.zig");
-const tool_dispatch = @import("../tooling/tool_dispatch.zig");
 const tool_projection = @import("../tooling/tool_projection.zig");
+const tool_runtime = @import("../tooling/tool_runtime.zig");
+const tool_set_contract = @import("../tooling/tool_set.zig");
 const web_backends = @import("../tooling/web_backends.zig");
 const run_manager = @import("run_manager.zig");
 
@@ -81,20 +88,88 @@ fn orchestrationPromptOverlay(
     return out.toOwnedSlice();
 }
 
-pub fn start(
+/// Explicitly typed host services for one orchestration agent-run admission.
+/// The composition root assembles this contract; this module never reaches
+/// into the application object. Borrowed fields reference app-owned state
+/// that outlives `start`; the only owned field is the permission-rule
+/// snapshot, which `start` moves into the prepared run.
+pub fn Services(comptime Host: type) type {
+    return struct {
+        /// Host allocation used for the prepared run and its strings.
+        alloc: Allocator,
+        /// Live orchestration admission state: authority, canonical turns,
+        /// and the run manager.
+        state: *orchestration_app_runtime.State(Host),
+        /// Credential resolution services for the routed provider.
+        oauth_transport: oauth_transport.Provider,
+        secret_store: host.SecretStore,
+        /// Owned copy of the permission rules, captured by the composition
+        /// root under the permission-authority lock so the projection and
+        /// the prepared run observe one consistent rule set. `start` moves
+        /// it into the prepared run; `deinit` frees it only when the run
+        /// never took it.
+        permission_rules: types.PermissionRuleSet = .{},
+        /// Effective tool set used to build the run's tool projection.
+        /// Static data for the native host profile.
+        tool_set: tool_set_contract.ToolSet,
+        /// Whether native subagents may be advertised to the run.
+        subagent_available: bool,
+        /// Base tool context assembled by the composition root after
+        /// admission. Borrowed: it embeds app-owned callbacks and runtime
+        /// pointers, and the run overrides its provider-derived fields
+        /// before use.
+        tool_context_base: tool_runtime.Context,
+        /// Constant provider bundle set used to select the run's provider.
+        providers: provider_set.Set,
+        /// Session usage metering shared with the host app.
+        usage: *session_usage.Usage,
+        /// Whether a Parallel local-search connection exists; selects the
+        /// projection's web-search mode.
+        parallel_connected: bool,
+        /// Parallel connection key borrowed from app connection state.
+        parallel_api_key: ?[]const u8 = null,
+        /// Web tool runtimes owned by the app; configured per run.
+        web: web_backends.Runtimes,
+        /// Prompt policy value: system prompt and per-model overlay.
+        policy: prompt_policy.Policy,
+        /// Skill catalog view for explicit skill prompt sections.
+        skills: skill_invocation.Catalog,
+        /// Context limits for skill section budgets.
+        context_limits: config_runtime.context_limits.Values,
+
+        /// Frees the owned permission-rule snapshot unless `start` moved it
+        /// into the prepared run. Every other field is borrowed.
+        pub fn deinit(self: *@This()) void {
+            self.permission_rules.deinit(self.alloc);
+            self.* = undefined;
+        }
+    };
+}
+
+/// Pure admission checks for one agent-run request: mode-active, authority
+/// match, scope and context-key consistency, and a unified provider. The
+/// composition root calls this before assembling active services so a
+/// rejected request never mutates shared runtime configuration.
+pub fn validateAdmission(
     comptime Host: type,
-    comptime App: type,
-    app: *App,
+    state: *const orchestration_app_runtime.State(Host),
     request: Host.AgentRunRequest,
 ) !void {
-    const AgentAppRuntime = app_agent_runtime.Runtime(App);
-    if (!app.orchestration.active) return error.OrchestrationModeInactive;
-    if (app.orchestration.active_source_turn_id != request.authority.source_turn_id) {
+    _ = try admit(Host, state, request);
+}
+
+fn admit(
+    comptime Host: type,
+    state: *const orchestration_app_runtime.State(Host),
+    request: Host.AgentRunRequest,
+) !model_provider.ProviderId {
+    if (!state.active) return error.OrchestrationModeInactive;
+    if (state.active_source_turn_id != request.authority.source_turn_id) {
         return error.OrchestrationAuthorityMismatch;
     }
     if (!std.mem.eql(
         u64,
-        app.orchestration.instruction_source_turn_ids.items,
+        state.instruction_source_turn_ids.items,
         request.authority.instruction_source_turn_ids,
     )) {
         return error.OrchestrationInstructionAuthorityMismatch;
@@ -115,15 +190,34 @@ pub fn start(
     if (provider_catalog.find(provider).catalog_scope != .unified) {
         return error.OrchestrationProviderNotUnified;
     }
+    return provider;
+}
+
+fn webSearchMode(
+    providers: provider_set.Set,
+    parallel_connected: bool,
+    provider: model_provider.ProviderId,
+) tool_projection.WebSearchMode {
+    if (providers.select(provider).capabilities.fx_search) return .provider;
+    if (parallel_connected) return .local;
+    return .unavailable;
+}
+
+pub fn start(
+    comptime Host: type,
+    services: *Services(Host),
+    request: Host.AgentRunRequest,
+) !void {
+    const provider = try admit(Host, services.state, request);
 
     var prompt = switch (request.visible_input) {
-        .canonical_turn => try app.orchestration.canonical_turns.cloneCanonical(
-            app.alloc,
+        .canonical_turn => try services.state.canonical_turns.cloneCanonical(
+            services.alloc,
             request.authority.source_turn_id,
             request.authority.instruction_source_turn_ids,
         ),
-        .projected => |projected| try app.orchestration.canonical_turns.cloneProjected(
-            app.alloc,
+        .projected => |projected| try services.state.canonical_turns.cloneProjected(
+            services.alloc,
             request.authority.source_turn_id,
             request.authority.instruction_source_turn_ids,
             projected.content,
@@ -131,14 +225,14 @@ pub fn start(
         ),
     };
     var owns_prompt = true;
-    errdefer if (owns_prompt) worker_runtime.freeQueuedPrompt(app.alloc, prompt);
+    errdefer if (owns_prompt) worker_runtime.freeQueuedPrompt(services.alloc, prompt);
     const supplemental_context = switch (request.visible_input) {
         .canonical_turn => |canonical| canonical.supplemental_context,
         .projected => "",
     };
     const continued_context = if (request.context_key) |key|
-        try app.orchestration.runs.attachContextSurface(
-            app.alloc,
+        try services.state.runs.attachContextSurface(
+            services.alloc,
             key,
             request.authority.source_turn_id,
             request.authority.instruction_source_turn_ids,
@@ -154,14 +248,14 @@ pub fn start(
     // a stable nonzero lifecycle key without reviving root-worker state.
     prompt.turn_id = request.authority.source_turn_id;
 
-    try routeOrchestrationCredential(App, app, &prompt, provider);
+    try routeOrchestrationCredential(Host, services, &prompt, provider);
     const exact_model = try orchestrationModelId(
-        app.alloc,
+        services.alloc,
         provider,
         request.model.route,
         request.model.name,
     );
-    app.alloc.free(prompt.model);
+    services.alloc.free(prompt.model);
     prompt.model = exact_model;
     prompt.provider = provider;
     prompt.agent_settings.effort = .auto;
@@ -170,13 +264,22 @@ pub fn start(
             return error.InvalidOrchestrationReasoningEffort;
     }
 
-    var projection = try app.snapshotModelToolProjectionForProvider(
-        app.alloc,
-        prompt.permission_mode,
-        provider,
+    var projection = try tool_projection.buildModelToolProjectionForSet(
+        services.alloc,
+        services.tool_set,
+        .{
+            .permission_mode = prompt.permission_mode,
+            .permission_rules = services.permission_rules,
+            .subagent_available = services.subagent_available,
+            .web_search_mode = webSearchMode(
+                services.providers,
+                services.parallel_connected,
+                provider,
+            ),
+        },
     );
     var owns_projection = true;
-    errdefer if (owns_projection) projection.deinit(app.alloc);
+    errdefer if (owns_projection) projection.deinit(services.alloc);
     debug_trace.eventf(
         "orchestration",
         "agent_run_host_admitted",
@@ -192,25 +295,15 @@ pub fn start(
             if (request.response_schema_json != null) "enabled" else "disabled",
         },
     );
-    var permission_rules = try types.dupePermissionRuleSet(
-        app.alloc,
-        app.permission_engine.rules,
-    );
+    // The composition root captured this owned snapshot under the
+    // permission-authority lock; it becomes the prepared run's rule set.
+    var permission_rules = services.permission_rules;
+    services.permission_rules = .{};
     var owns_permission_rules = true;
-    errdefer if (owns_permission_rules) permission_rules.deinit(app.alloc);
+    errdefer if (owns_permission_rules) permission_rules.deinit(services.alloc);
 
-    var tool_context = AgentAppRuntime.toolContext(
-        app,
-        &tool_dispatch.default_ignored_list_entries,
-        tool_dispatch.default_max_list_entries,
-        tool_dispatch.default_max_read_file_bytes,
-        tool_dispatch.default_max_read_file_lines,
-        tool_dispatch.default_max_read_file_line_len,
-        tool_dispatch.default_max_command_output_bytes,
-        builtin_gateway.retry_count,
-        builtin_gateway.defaultChatUrl(),
-    );
-    const bundle = app.providerSet().select(provider);
+    var tool_context = services.tool_context_base;
+    const bundle = services.providers.select(provider);
     tool_context.agent_stream_provider = bundle.agent_stream_or_unavailable();
     tool_context.provider = provider;
     tool_context.provider_capabilities = bundle.capabilities;
@@ -232,14 +325,10 @@ pub fn start(
         .worker_model = prompt.model,
         .gateway_retry_count = builtin_gateway.retry_count,
         .gateway_chat_url = builtin_gateway.defaultChatUrl(),
-        .usage = &app.session.usage,
-        .usage_allocator = app.alloc,
-        .parallel_api_key = if (app.parallel_connection) |*connection| connection.api_key else null,
-    }, .{
-        .web_search = &app.web_search_runtime,
-        .parallel_web_search = &app.parallel_web_search_runtime,
-        .parallel_web_fetch = &app.parallel_web_fetch_runtime,
-    });
+        .usage = services.usage,
+        .usage_allocator = services.alloc,
+        .parallel_api_key = services.parallel_api_key,
+    }, services.web);
     tool_context.web_search_backend = configured_backends.web_search;
     tool_context.web_fetch_backend = configured_backends.web_fetch;
     tool_context.web_search_runtime_ready = configured_backends.web_search_runtime_ready;
@@ -247,28 +336,28 @@ pub fn start(
         tool_context.context_enabled = false;
     }
 
-    const policy_snapshot = app.promptPolicy();
+    const policy_snapshot = services.policy;
     var strings_transferred = false;
-    const system_prompt = try app.alloc.dupe(u8, policy_snapshot.system_prompt);
-    errdefer if (!strings_transferred) app.alloc.free(system_prompt);
+    const system_prompt = try services.alloc.dupe(u8, policy_snapshot.system_prompt);
+    errdefer if (!strings_transferred) services.alloc.free(system_prompt);
     const model_prompt_overlay = try orchestrationPromptOverlay(
-        app.alloc,
+        services.alloc,
         policy_snapshot.modelPromptOverlay(prompt.model),
         request.system_prompt,
         if (continued_context) "" else supplemental_context,
     );
-    errdefer if (!strings_transferred) app.alloc.free(model_prompt_overlay);
+    errdefer if (!strings_transferred) services.alloc.free(model_prompt_overlay);
 
     const skills_prompt_section: []u8 = &.{};
     var explicit_skills_prompt_section: []u8 = &.{};
     if (request.visible_input == .canonical_turn) {
         // Routed skill mentions are no longer injected as prompt text;
         // the advertised skill catalog and the skill tool load them.
-        const explicit_bindings = try app.alloc.alloc(
+        const explicit_bindings = try services.alloc.alloc(
             skill_invocation.ExplicitBinding,
             prompt.skill_bindings.len,
         );
-        defer app.alloc.free(explicit_bindings);
+        defer services.alloc.free(explicit_bindings);
         for (prompt.skill_bindings, 0..) |binding, index| {
             explicit_bindings[index] = .{
                 .name = binding.name,
@@ -276,47 +365,44 @@ pub fn start(
             };
         }
         var explicit = try skill_invocation.buildExplicitPromptSection(
-            app.alloc,
-            .{
-                .skills = app.skills.items,
-                .diagnostics = app.skills.diagnostics,
-            },
+            services.alloc,
+            services.skills,
             prompt.prompt,
             explicit_bindings,
-            app.context_limits,
+            services.context_limits,
             null,
         );
-        defer explicit.deinit(app.alloc);
-        explicit_skills_prompt_section = try app.alloc.dupe(
+        defer explicit.deinit(services.alloc);
+        explicit_skills_prompt_section = try services.alloc.dupe(
             u8,
             explicit.text,
         );
-        errdefer if (!strings_transferred) app.alloc.free(explicit_skills_prompt_section);
+        errdefer if (!strings_transferred) services.alloc.free(explicit_skills_prompt_section);
     }
 
-    const run_id = try app.alloc.dupe(u8, request.run_id);
-    errdefer if (!strings_transferred) app.alloc.free(run_id);
+    const run_id = try services.alloc.dupe(u8, request.run_id);
+    errdefer if (!strings_transferred) services.alloc.free(run_id);
     const context_key = if (request.context_key) |key|
-        try app.alloc.dupe(u8, key)
+        try services.alloc.dupe(u8, key)
     else
         null;
     errdefer if (!strings_transferred) {
-        if (context_key) |key| app.alloc.free(key);
+        if (context_key) |key| services.alloc.free(key);
     };
-    const instruction_source_turn_ids = try app.alloc.dupe(
+    const instruction_source_turn_ids = try services.alloc.dupe(
         u64,
         request.authority.instruction_source_turn_ids,
     );
-    errdefer if (!strings_transferred) app.alloc.free(instruction_source_turn_ids);
+    errdefer if (!strings_transferred) services.alloc.free(instruction_source_turn_ids);
     const response_schema_json = if (request.response_schema_json) |schema|
-        try app.alloc.dupe(u8, schema)
+        try services.alloc.dupe(u8, schema)
     else
         null;
     errdefer if (!strings_transferred) {
-        if (response_schema_json) |schema| app.alloc.free(schema);
+        if (response_schema_json) |schema| services.alloc.free(schema);
     };
-    const lifecycle_session_id = try app.alloc.dupe(u8, request.run_id);
-    errdefer if (!strings_transferred) app.alloc.free(lifecycle_session_id);
+    const lifecycle_session_id = try services.alloc.dupe(u8, request.run_id);
+    errdefer if (!strings_transferred) services.alloc.free(lifecycle_session_id);
 
     var owned_prepared = run_manager.Prepared{
         .run_id = run_id,
@@ -335,47 +421,47 @@ pub fn start(
         .lifecycle_session_id = lifecycle_session_id,
     };
     var owns_prepared = true;
-    errdefer if (owns_prepared) owned_prepared.deinit(app.alloc);
+    errdefer if (owns_prepared) owned_prepared.deinit(services.alloc);
     owns_prompt = false;
     owns_projection = false;
     owns_permission_rules = false;
     strings_transferred = true;
-    try app.orchestration.runs.start(owned_prepared);
+    try services.state.runs.start(owned_prepared);
     owns_prepared = false;
 }
 
 fn routeOrchestrationCredential(
-    comptime App: type,
-    app: *App,
+    comptime Host: type,
+    services: *Services(Host),
     prompt: *worker_runtime.QueuedPrompt,
     provider: model_provider.ProviderId,
 ) !void {
     if (model_provider.authorizesCredential(provider, prompt.credential_source)) return;
     const resolution = try credentials.resolveForProvider(
-        app.alloc,
-        app.auth.oauthTransport(),
-        app.auth.secretStore(),
+        services.alloc,
+        services.oauth_transport,
+        services.secret_store,
         .refresh_if_needed,
         provider,
         prompt.credential_source,
     );
     var credential = resolution.credential orelse return error.OrchestrationCredentialMissing;
-    defer credential.deinit(app.alloc);
-    const token = try app.alloc.dupe(u8, credential.token);
-    errdefer secret.zeroAndFree(app.alloc, token);
+    defer credential.deinit(services.alloc);
+    const token = try services.alloc.dupe(u8, credential.token);
+    errdefer secret.zeroAndFree(services.alloc, token);
     const gateway_team = if (credential.gatewayTeam()) |team|
-        try app.alloc.dupe(u8, team)
+        try services.alloc.dupe(u8, team)
     else
         null;
-    errdefer if (gateway_team) |team| app.alloc.free(team);
+    errdefer if (gateway_team) |team| services.alloc.free(team);
     const account_id = if (credential.accountId()) |id|
-        try app.alloc.dupe(u8, id)
+        try services.alloc.dupe(u8, id)
     else
         null;
 
-    secret.zeroAndFree(app.alloc, prompt.api_key);
-    if (prompt.gateway_team) |team| app.alloc.free(team);
-    if (prompt.account_id) |id| app.alloc.free(id);
+    secret.zeroAndFree(services.alloc, prompt.api_key);
+    if (prompt.gateway_team) |team| services.alloc.free(team);
+    if (prompt.account_id) |id| services.alloc.free(id);
     prompt.api_key = token;
     prompt.gateway_team = gateway_team;
     prompt.account_id = account_id;

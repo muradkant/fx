@@ -1,6 +1,7 @@
 const std = @import("std");
 const io_mod = @import("../shared/io.zig");
 const debug_trace = @import("../shared/debug_trace.zig");
+const orchestration_binding = @import("../orchestration/session_binding.zig");
 const session = @import("session.zig");
 const session_codec = @import("session_codec.zig");
 const session_layout = @import("session_layout.zig");
@@ -9,13 +10,16 @@ const summary_codec = @import("session_summary_codec.zig");
 
 const Allocator = std.mem.Allocator;
 const Sha256 = std.crypto.hash.sha2.Sha256;
-// Disposable v4 proofs bind replay and the legacy route gates to one stat window.
-const magic = "fx-resume-catalog-v4\n";
+// Disposable v5 proofs bind replay and the legacy route gates to one stat
+// window. v5 adds the ALT orchestration binding to picker rows and folds
+// the binding sidecar into the picker fingerprint; v4 caches rebuild once.
+const magic = "fx-resume-catalog-v5\n";
 const file_name = ".resume-catalog";
 pub const max_bytes = 64 * 1024 * 1024;
 pub const max_records = 100_000;
 const Fingerprint = [Sha256.digest_length]u8;
 const Generation = @import("session_event.zig").Identifier;
+const binding_digest_len = 64;
 
 pub const Entry = struct {
     fingerprint: ?Fingerprint,
@@ -70,6 +74,20 @@ const Summary = struct {
     language: []const u8,
     has_checkpoint: bool,
     has_managed_children: bool,
+    orchestration: ?Orchestration = null,
+    orchestration_binding_invalid: bool = false,
+
+    /// Cached ALT session binding. Slices borrow the loaded cache document;
+    /// `clone` converts them into an owned summary binding.
+    const Orchestration = struct {
+        extension_id: []const u8,
+        extension_name: []const u8,
+        definition_kind: []const u8,
+        definition_id: []const u8,
+        definition_revision: u32,
+        definition_digest: []const u8,
+        display_name: []const u8,
+    };
 
     fn from(source: *const session_store.SessionSummary) Summary {
         return .{
@@ -84,6 +102,19 @@ const Summary = struct {
             .language = source.conversation_language.view(),
             .has_checkpoint = source.has_checkpoint,
             .has_managed_children = source.has_managed_children,
+            .orchestration = if (source.orchestration) |*binding|
+                Orchestration{
+                    .extension_id = binding.extension_id,
+                    .extension_name = binding.extension_name,
+                    .definition_kind = binding.definition_kind,
+                    .definition_id = binding.definition_id,
+                    .definition_revision = binding.definition_revision,
+                    .definition_digest = &binding.definition_digest,
+                    .display_name = binding.display_name,
+                }
+            else
+                null,
+            .orchestration_binding_invalid = source.orchestration_binding_invalid,
         };
     }
 
@@ -101,7 +132,25 @@ const Summary = struct {
             .conversation_language = try session.ConversationLanguage.fromSlice(self.language),
             .has_checkpoint = self.has_checkpoint,
             .has_managed_children = self.has_managed_children,
+            .orchestration = try self.ownedOrchestration(),
+            .orchestration_binding_invalid = self.orchestration_binding_invalid,
         });
+    }
+
+    /// Builds the borrowed binding view consumed by `cloneSessionSummary`,
+    /// which duplicates every string; the view is never freed or mutated.
+    fn ownedOrchestration(self: Summary) !?session_store.OwnedOrchestrationBinding {
+        const wire = self.orchestration orelse return null;
+        if (wire.definition_digest.len != binding_digest_len) return error.InvalidCatalogCache;
+        return session_store.OwnedOrchestrationBinding{
+            .extension_id = @constCast(wire.extension_id),
+            .extension_name = @constCast(wire.extension_name),
+            .definition_kind = @constCast(wire.definition_kind),
+            .definition_id = @constCast(wire.definition_id),
+            .definition_revision = wire.definition_revision,
+            .definition_digest = wire.definition_digest[0..binding_digest_len].*,
+            .display_name = @constCast(wire.display_name),
+        };
     }
 };
 
@@ -207,6 +256,20 @@ pub const Loaded = struct {
                     if (root) |path| {
                         if (!std.fs.path.isAbsolute(path) or path.len > std.Io.Dir.max_path_bytes) return error.InvalidCatalogCache;
                     }
+                }
+                if (summary.orchestration) |binding| {
+                    if (binding.definition_digest.len != binding_digest_len) return error.InvalidCatalogCache;
+                    var binding_digest: [binding_digest_len]u8 = undefined;
+                    @memcpy(&binding_digest, binding.definition_digest);
+                    orchestration_binding.validate(.{
+                        .extension_id = binding.extension_id,
+                        .extension_name = binding.extension_name,
+                        .definition_kind = binding.definition_kind,
+                        .definition_id = binding.definition_id,
+                        .definition_revision = binding.definition_revision,
+                        .definition_digest = binding_digest,
+                        .display_name = binding.display_name,
+                    }) catch return error.InvalidCatalogCache;
                 }
             }
             const entry = index.getOrPutAssumeCapacity(row.id);
@@ -361,6 +424,15 @@ pub fn fingerprint(dir: std.Io.Dir, id: []const u8) !?Fingerprint {
                 addStat(&digest, marker);
             } else digest.update(&.{0});
         }
+    } else digest.update(&.{0});
+    // The ALT orchestration sidecar is picker-visible metadata: fold its
+    // presence and identity into the same stat window so binding writes,
+    // rotations, and removals invalidate cached rows.
+    const binding_path = try std.fmt.bufPrint(&path_buffer, "{s}/{s}", .{ id, orchestration_binding.sidecar_file });
+    if (try statOptional(dir, binding_path)) |stat| {
+        if (stat.kind != .file or stat.nlink != 1) return null;
+        digest.update(&.{1});
+        addStat(&digest, stat);
     } else digest.update(&.{0});
     const after = (try statOptional(dir, id)) orelse return null;
     if (!sameStat(before, after)) return null;
@@ -786,4 +858,164 @@ test "catalog fingerprint detects event appends and child directory permissions"
     try child.setPermissions(std.testing.io, .fromMode(0o755));
     const changed = (try fingerprint(tmp.dir, "session")).?;
     try std.testing.expect(!std.mem.eql(u8, &private, &changed));
+}
+
+test "catalog fingerprint observes orchestration sidecar creation, replacement, and deletion" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(std.testing.io, "session");
+    for ([_][]const u8{ "session/session.json", "session/events.jsonl" }) |path| {
+        var file = try tmp.dir.createFile(std.testing.io, path, .{});
+        defer file.close(std.testing.io);
+        try file.writeStreamingAll(std.testing.io, "{}\n");
+    }
+    const bare = (try fingerprint(tmp.dir, "session")).?;
+    var dir = io_mod.VerifiedDir{ .dir = try tmp.dir.openDir(
+        std.testing.io,
+        "session",
+        .{ .iterate = true, .follow_symlinks = false },
+    ) };
+    defer dir.close();
+    try orchestration_binding.write(alloc, &dir, .{
+        .extension_id = "alt",
+        .extension_name = "ALT",
+        .definition_kind = "team",
+        .definition_id = "engineering",
+        .definition_revision = 3,
+        .definition_digest = [_]u8{'b'} ** 64,
+        .display_name = "Engineering",
+    });
+    const created = (try fingerprint(tmp.dir, "session")).?;
+    try std.testing.expect(!std.mem.eql(u8, &bare, &created));
+    try orchestration_binding.write(alloc, &dir, .{
+        .extension_id = "alt",
+        .extension_name = "ALT",
+        .definition_kind = "team",
+        .definition_id = "engineering",
+        .definition_revision = 4,
+        .definition_digest = [_]u8{'c'} ** 64,
+        .display_name = "Engineering",
+    });
+    const replaced = (try fingerprint(tmp.dir, "session")).?;
+    try std.testing.expect(!std.mem.eql(u8, &created, &replaced));
+    try dir.dir.deleteFile(std.testing.io, orchestration_binding.sidecar_file);
+    const deleted = (try fingerprint(tmp.dir, "session")).?;
+    try std.testing.expect(!std.mem.eql(u8, &replaced, &deleted));
+}
+
+test "catalog cache round trips orchestration bindings on warm reuse" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var writer = Writer{ .dir = .{ .dir = try tmp.dir.openDir(std.testing.io, ".", .{ .iterate = true }) } };
+    defer writer.deinit();
+    const encoded = try orchestration_binding.encode(alloc, .{
+        .extension_id = "alt",
+        .extension_name = "ALT",
+        .definition_kind = "team",
+        .definition_id = "engineering",
+        .definition_revision = 7,
+        .definition_digest = [_]u8{'a'} ** 64,
+        .display_name = "Engineering",
+    });
+    defer alloc.free(encoded);
+    var owned = try orchestration_binding.decode(alloc, encoded);
+    defer owned.deinit(alloc);
+    var entries = [_]Entry{
+        .{ .fingerprint = @splat(1), .value = .{ .visible = try summary_codec.cloneSessionSummary(alloc, .{
+            .id = @constCast("bound"),
+            .created_at_ms = 1,
+            .updated_at_ms = 2,
+            .history_len = 3,
+            .conversation_language = session.ConversationLanguage.literal("en"),
+            .orchestration = owned,
+        }) } },
+        .{ .fingerprint = @splat(2), .value = .{ .visible = try summary_codec.cloneSessionSummary(alloc, .{
+            .id = @constCast("flagged"),
+            .created_at_ms = 1,
+            .updated_at_ms = 2,
+            .history_len = 3,
+            .conversation_language = session.ConversationLanguage.literal("en"),
+            .orchestration_binding_invalid = true,
+        }) } },
+    };
+    defer for (&entries) |*entry| entry.deinit(alloc);
+    var stop = std.atomic.Value(bool).init(false);
+    try writer.save(alloc, &entries, &stop);
+    var loaded = try Loaded.load(alloc, writer.dir, null);
+    defer loaded.deinit(alloc);
+    try std.testing.expect(loaded.present());
+    var reused_bound = (try loaded.reuse(alloc, "bound", @splat(1))).?;
+    defer reused_bound.deinit(alloc);
+    const binding = reused_bound.value.visible.orchestration orelse
+        return error.TestExpectedBinding;
+    try std.testing.expectEqualStrings("engineering", binding.definition_id);
+    try std.testing.expectEqual(@as(u32, 7), binding.definition_revision);
+    try std.testing.expectEqualStrings("Engineering", binding.display_name);
+    try std.testing.expect(!reused_bound.value.visible.orchestration_binding_invalid);
+    var reused_flagged = (try loaded.reuse(alloc, "flagged", @splat(2))).?;
+    defer reused_flagged.deinit(alloc);
+    try std.testing.expect(reused_flagged.value.visible.orchestration == null);
+    try std.testing.expect(reused_flagged.value.visible.orchestration_binding_invalid);
+}
+
+test "catalog cache rejects malformed cached orchestration bindings" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var writer = Writer{ .dir = .{ .dir = try tmp.dir.openDir(std.testing.io, ".", .{ .iterate = true }) } };
+    defer writer.deinit();
+    const encoded = try orchestration_binding.encode(alloc, .{
+        .extension_id = "alt",
+        .extension_name = "ALT",
+        .definition_kind = "team",
+        .definition_id = "engineering",
+        .definition_revision = 7,
+        .definition_digest = [_]u8{'a'} ** 64,
+        .display_name = "Engineering",
+    });
+    defer alloc.free(encoded);
+    var owned = try orchestration_binding.decode(alloc, encoded);
+    defer owned.deinit(alloc);
+    var entries = [_]Entry{.{ .fingerprint = @splat(1), .value = .{ .visible = try summary_codec.cloneSessionSummary(alloc, .{
+        .id = @constCast("bound"),
+        .created_at_ms = 1,
+        .updated_at_ms = 2,
+        .history_len = 3,
+        .conversation_language = session.ConversationLanguage.literal("en"),
+        .orchestration = owned,
+    }) } }};
+    defer for (&entries) |*entry| entry.deinit(alloc);
+    var stop = std.atomic.Value(bool).init(false);
+    try writer.save(alloc, &entries, &stop);
+    // Tamper the saved row into a semantically invalid binding (revision
+    // zero) and reseal the digest so only validation can reject it.
+    var file = try writer.dir.dir.openFile(std.testing.io, file_name, .{ .mode = .read_only });
+    defer file.close(std.testing.io);
+    const stat = try file.stat(std.testing.io);
+    const raw = try alloc.alloc(u8, @intCast(stat.size));
+    defer alloc.free(raw);
+    const read = try file.readPositionalAll(std.testing.io, raw, 0);
+    try std.testing.expectEqual(raw.len, read);
+    const payload = raw[magic.len + Sha256.digest_length ..];
+    const tampered = try std.mem.replaceOwned(
+        u8,
+        alloc,
+        payload,
+        "\"definition_revision\":7",
+        "\"definition_revision\":0",
+    );
+    defer alloc.free(tampered);
+    var digest: Fingerprint = undefined;
+    Sha256.hash(tampered, &digest, .{});
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    defer out.deinit();
+    try out.writer.writeAll(magic);
+    try out.writer.writeAll(&digest);
+    try out.writer.writeAll(tampered);
+    try io_mod.durableReplaceVerified(alloc, &writer.dir, file_name, out.written());
+    var loaded = try Loaded.load(alloc, writer.dir, null);
+    defer loaded.deinit(alloc);
+    try std.testing.expect(!loaded.present());
 }

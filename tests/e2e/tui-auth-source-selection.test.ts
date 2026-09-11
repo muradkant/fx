@@ -859,6 +859,8 @@ function startFakeOpenCode() {
 function startFakeCline() {
   const apiKey = "cline-e2e-api-key";
   const accountToken = "cline-e2e-account-token";
+  const refreshedWorkosAccessToken = "cline-e2e-refreshed-workos-access";
+  const refreshedWorkosRefreshToken = "cline-e2e-refreshed-workos-refresh";
   const refreshedAccountToken = "cline-e2e-refreshed-account-token";
   const requests: Array<{
     path: string;
@@ -936,14 +938,16 @@ function startFakeCline() {
         });
       }
       if (url.pathname === "/register") {
-        // Registration rotates the server-side session: a refreshed WorkOS
-        // token is re-registered and the response carries the rotated account
-        // token, which becomes the stored credential.
+        // Registration rotates the server-side session: fx registers the
+        // initial WorkOS pair at login and re-registers the refreshed pair
+        // after a token refresh. Only the refreshed pair yields the rotated
+        // account token, so a regression that skips re-registration can no
+        // longer satisfy the stored-credential assertions.
         const posted = JSON.parse(body ?? "{}") as { accessToken?: string };
         return Response.json({
           success: true,
           data: {
-            accessToken: posted.accessToken === refreshedAccountToken
+            accessToken: posted.accessToken === refreshedWorkosAccessToken
               ? refreshedAccountToken
               : accountToken,
             refreshToken: "cline-account-refresh",
@@ -954,10 +958,16 @@ function startFakeCline() {
         });
       }
       if (url.pathname === "/refresh") {
+        // A refresh returns a distinct WorkOS pair, never the account
+        // credential itself: the account token is only ever issued by
+        // re-registering the refreshed pair. Returning the account token
+        // here would let a skipped re-registration still pass the chat
+        // authorization assertion.
         return Response.json({
           success: true,
           data: {
-            accessToken: refreshedAccountToken,
+            accessToken: refreshedWorkosAccessToken,
+            refreshToken: refreshedWorkosRefreshToken,
             tokenType: "Bearer",
             expiresAt: "2031-01-01T00:00:00.000Z",
             userInfo: { clineUserId: "cline-user-e2e" },
@@ -979,6 +989,8 @@ function startFakeCline() {
   return {
     apiKey,
     accountToken,
+    refreshedWorkosAccessToken,
+    refreshedWorkosRefreshToken,
     refreshedAccountToken,
     requests,
     env: {
@@ -4760,16 +4772,26 @@ test("Cline account login exposes free and ClinePass routes without an invented 
     expect(chat.isMultiroot).toBe("false");
     expect(chat.platform).toBe("cli");
     expect(chat.platformVersion).toBe(chat.clientVersion);
-    const register = cline.requests.find((request) => request.path === "/register")!;
-    expect(register.userAgent).toStartWith("fx/");
-    expect(register.clientType).toBeNull();
-    expect(register.clientVersion).toBeNull();
-    expect(register.coreVersion).toBeNull();
-    expect(register.taskId).toBeNull();
-    expect(JSON.parse(register.body ?? "{}")).toEqual({
+    // Refresh must re-register the rotated WorkOS pair: the account token
+    // used by chat is only ever issued by the second registration, so both
+    // requests and their exact payloads are asserted.
+    const registerRequests = cline.requests.filter((request) => request.path === "/register");
+    expect(registerRequests).toHaveLength(2);
+    expect(JSON.parse(registerRequests[0]!.body ?? "{}")).toEqual({
       accessToken: "workos-access",
       refreshToken: "workos-refresh",
     });
+    expect(JSON.parse(registerRequests[1]!.body ?? "{}")).toEqual({
+      accessToken: cline.refreshedWorkosAccessToken,
+      refreshToken: cline.refreshedWorkosRefreshToken,
+    });
+    for (const register of registerRequests) {
+      expect(register.userAgent).toStartWith("fx/");
+      expect(register.clientType).toBeNull();
+      expect(register.clientVersion).toBeNull();
+      expect(register.coreVersion).toBeNull();
+      expect(register.taskId).toBeNull();
+    }
     const refresh = refreshRequests[0]!;
     expect(refresh.userAgent).toStartWith("fx/");
     expect(refresh.clientType).toBeNull();

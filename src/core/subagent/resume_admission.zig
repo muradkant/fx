@@ -1,6 +1,7 @@
 const std = @import("std");
 const child_state = @import("child_state.zig");
 const io_mod = @import("../shared/io.zig");
+const orchestration_binding = @import("../orchestration/session_binding.zig");
 const session = @import("../session/session.zig");
 const session_codec = @import("../session/session_codec.zig");
 const session_store = @import("../session/session_store.zig");
@@ -112,6 +113,29 @@ const CatalogWorker = struct {
                     break :blk true;
                 },
             };
+            if (!managed) {
+                // Read the ALT binding sidecar inside the before/after
+                // fingerprint window so a concurrent binding write forces a
+                // cache miss instead of publishing a stale summary/binding
+                // pair. A malformed sidecar is deterministic for the file's
+                // bytes and stays cacheable; a transient read failure must
+                // not be cached, or it would persist until the file changed.
+                candidate.summary.orchestration = self.read.store.readOrchestrationBinding(
+                    self.alloc,
+                    id,
+                ) catch |err| switch (err) {
+                    error.OutOfMemory => return err,
+                    error.InvalidBinding => blk: {
+                        candidate.summary.orchestration_binding_invalid = true;
+                        break :blk null;
+                    },
+                    else => blk: {
+                        candidate.summary.orchestration_binding_invalid = true;
+                        cacheable = false;
+                        break :blk null;
+                    },
+                };
+            }
             const after = if (cacheable) catalog_cache.fingerprint(dir.dir, id) catch null else null;
             const stable = if (before) |a| if (after) |z| std.mem.eql(u8, &a, &z) else false else false;
             var entry = catalog_cache.Entry{
@@ -188,22 +212,13 @@ pub fn listActionableCatalog(
         if (stop_requested.load(.acquire)) return error.Cancelled;
         if (entry.fingerprint != null) cacheable += 1;
         switch (entry.value) {
+            // The worker or a reused cache row already attached the ALT
+            // binding, so cloning preserves it without re-reading the
+            // sidecar on this deliberately cached path.
             .visible => |summary| {
                 if (active_id) |active| if (std.mem.eql(u8, active, summary.id)) continue;
                 var copy = try session_summary_codec.cloneSessionSummary(alloc, summary);
                 errdefer copy.deinit(alloc);
-                if (copy.orchestration) |*binding| binding.deinit(alloc);
-                copy.orchestration = null;
-                copy.orchestration = store.readOrchestrationBinding(
-                    alloc,
-                    summary.id,
-                ) catch |err| switch (err) {
-                    error.OutOfMemory => return error.OutOfMemory,
-                    else => blk: {
-                        copy.orchestration_binding_invalid = true;
-                        break :blk null;
-                    },
-                };
                 try catalog.summaries.append(alloc, copy);
             },
             .excluded, .legacy_ranking => {},
@@ -583,6 +598,181 @@ test "actionable catalog preserves discovery and child visibility" {
     var read_only = try session_store.Store.initReadOnlyFromHome(alloc, home, workspace);
     defer read_only.deinit(alloc);
     try std.testing.expect((try catalog_cache.Writer.init(read_only)) == null);
+}
+
+test "actionable catalog serves ALT bindings from workers and the cache" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(std.testing.io, "home/.fx");
+    try tmp.dir.createDirPath(std.testing.io, "workspace");
+    const home = try io_mod.dirRealpathAlloc(alloc, tmp.dir, "home");
+    defer alloc.free(home);
+    const workspace = try io_mod.dirRealpathAlloc(alloc, tmp.dir, "workspace");
+    defer alloc.free(workspace);
+    var store = try session_store.Store.initFromHome(alloc, home, workspace);
+    defer store.deinit(alloc);
+    const history = [_]session.HistoryTurn{.{ .assistant = .{
+        .user = .{ .text = @constCast("saved request") },
+        .assistant = @constCast("saved response"),
+    } }};
+    const durable = session_codec.DurableSessionState{
+        .id = @constCast("public"),
+        .origin_workspace_root = workspace,
+        .workspace_root = workspace,
+        .created_at_ms = 1,
+        .updated_at_ms = 2,
+        .conversation_language = session.ConversationLanguage.literal("en"),
+        .history = @constCast(&history),
+        .total_input_tokens = 0,
+        .total_output_tokens = 0,
+        .preferences = .{ .model = @constCast("test"), .effort = .auto, .fast_mode = false },
+    };
+    var writable = try store.startWritableSession(alloc, durable);
+    writable.deinit(alloc);
+    const binding = session_store.OrchestrationBinding{
+        .extension_id = "alt",
+        .extension_name = "ALT",
+        .definition_kind = "team",
+        .definition_id = "engineering",
+        .definition_revision = 3,
+        .definition_digest = [_]u8{'b'} ** 64,
+        .display_name = "Engineering",
+    };
+    try store.writeOrchestrationBinding(alloc, "public", binding);
+    var stopped = std.atomic.Value(bool).init(false);
+    var writer = (try catalog_cache.Writer.init(store)).?;
+    defer writer.deinit();
+
+    // A cold load reads the sidecar in the parallel worker phase.
+    var built = try listActionableCatalog(store, alloc, null, &stopped, &writer);
+    defer built.deinit(alloc);
+    try std.testing.expectEqual(@as(usize, 1), built.summaries.items.len);
+    const built_binding = built.summaries.items[0].orchestration orelse
+        return error.TestExpectedBinding;
+    try std.testing.expectEqualStrings("engineering", built_binding.definition_id);
+    try std.testing.expect(!built.summaries.items[0].orchestration_binding_invalid);
+
+    // A warm load serves the cached binding instead of re-reading sidecars.
+    var warm = try listActionableCatalog(store, alloc, null, &stopped, &writer);
+    defer warm.deinit(alloc);
+    try std.testing.expectEqual(@as(usize, 1), warm.summaries.items.len);
+    const warm_binding = warm.summaries.items[0].orchestration orelse
+        return error.TestExpectedBinding;
+    try std.testing.expectEqualStrings("engineering", warm_binding.definition_id);
+    const stamp = (try catalog_cache.fingerprint(store.canonical_root.sessions.?.dir, "public")).?;
+    {
+        var saved = try catalog_cache.Loaded.load(alloc, writer.dir, null);
+        defer saved.deinit(alloc);
+        var reused = (try saved.reuse(alloc, "public", stamp)).?;
+        defer reused.deinit(alloc);
+        try std.testing.expect(reused.value.visible.orchestration != null);
+    }
+
+    // A malformed sidecar is deterministic for its bytes: the invalid
+    // marker is served and cached until the file changes.
+    {
+        var session_dir = io_mod.VerifiedDir{ .dir = try store.canonical_root.sessions.?.dir.openDir(
+            std.testing.io,
+            "public",
+            .{ .iterate = true, .follow_symlinks = false },
+        ) };
+        defer session_dir.close();
+        try io_mod.durableReplaceVerified(
+            alloc,
+            &session_dir,
+            orchestration_binding.sidecar_file,
+            "corrupt",
+        );
+    }
+    var malformed = try listActionableCatalog(store, alloc, null, &stopped, &writer);
+    defer malformed.deinit(alloc);
+    try std.testing.expectEqual(@as(usize, 1), malformed.summaries.items.len);
+    try std.testing.expect(malformed.summaries.items[0].orchestration == null);
+    try std.testing.expect(malformed.summaries.items[0].orchestration_binding_invalid);
+    {
+        var saved = try catalog_cache.Loaded.load(alloc, writer.dir, null);
+        defer saved.deinit(alloc);
+        const corrupt_stamp = (try catalog_cache.fingerprint(
+            store.canonical_root.sessions.?.dir,
+            "public",
+        )).?;
+        var reused = (try saved.reuse(alloc, "public", corrupt_stamp)).?;
+        defer reused.deinit(alloc);
+        try std.testing.expect(reused.value.visible.orchestration == null);
+        try std.testing.expect(reused.value.visible.orchestration_binding_invalid);
+    }
+
+    // Repair changes the sidecar identity and restores a fresh binding.
+    var repaired_binding = binding;
+    repaired_binding.definition_revision = 4;
+    try store.writeOrchestrationBinding(alloc, "public", repaired_binding);
+    var repaired = try listActionableCatalog(store, alloc, null, &stopped, &writer);
+    defer repaired.deinit(alloc);
+    try std.testing.expect(!repaired.summaries.items[0].orchestration_binding_invalid);
+    try std.testing.expectEqualStrings(
+        "engineering",
+        (repaired.summaries.items[0].orchestration orelse
+            return error.TestExpectedBinding).definition_id,
+    );
+
+    // A transient read failure is reported but never cached: the worker
+    // leaves the observation uncacheable so the next load retries.
+    {
+        var session_dir = io_mod.VerifiedDir{ .dir = try store.canonical_root.sessions.?.dir.openDir(
+            std.testing.io,
+            "public",
+            .{ .iterate = true, .follow_symlinks = false },
+        ) };
+        defer session_dir.close();
+        try session_dir.dir.deleteFile(std.testing.io, orchestration_binding.sidecar_file);
+        try session_dir.dir.createDir(
+            std.testing.io,
+            orchestration_binding.sidecar_file,
+            .fromMode(0o700),
+        );
+    }
+    var transient = try listActionableCatalog(store, alloc, null, &stopped, &writer);
+    defer transient.deinit(alloc);
+    try std.testing.expectEqual(@as(usize, 1), transient.summaries.items.len);
+    try std.testing.expect(transient.summaries.items[0].orchestration == null);
+    try std.testing.expect(transient.summaries.items[0].orchestration_binding_invalid);
+    {
+        var empty_cache: catalog_cache.Loaded = .{};
+        var read_once = CatalogRead{
+            .store = store,
+            .candidates = store.readOnlyCandidates(),
+            .active_id = null,
+            .cancelled = &stopped,
+            .cache = &empty_cache,
+        };
+        var worker_once = CatalogWorker{ .read = &read_once, .alloc = alloc };
+        defer {
+            for (worker_once.entries.items) |*entry| entry.deinit(alloc);
+            worker_once.entries.deinit(alloc);
+        }
+        worker_once.run();
+        try std.testing.expect(worker_once.failure == null);
+        var observed = false;
+        for (worker_once.entries.items) |*entry| {
+            if (entry.value != .visible) continue;
+            if (!std.mem.eql(u8, entry.value.visible.id, "public")) continue;
+            observed = true;
+            try std.testing.expect(entry.fingerprint == null);
+            try std.testing.expect(entry.value.visible.orchestration == null);
+            try std.testing.expect(entry.value.visible.orchestration_binding_invalid);
+        }
+        try std.testing.expect(observed);
+    }
+    {
+        var session_dir = io_mod.VerifiedDir{ .dir = try store.canonical_root.sessions.?.dir.openDir(
+            std.testing.io,
+            "public",
+            .{ .iterate = true, .follow_symlinks = false },
+        ) };
+        defer session_dir.close();
+        try session_dir.dir.deleteDir(std.testing.io, orchestration_binding.sidecar_file);
+    }
 }
 
 test "managed child marker is hidden from external access" {
