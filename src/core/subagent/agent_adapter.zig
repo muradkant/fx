@@ -260,6 +260,7 @@ pub fn run(
         },
     );
     const deps = runtimeDeps(&context);
+    var failure_cause: ?[]const u8 = null;
     agent_run_service.run(.{
         .agent = &turn.sessionRuntime().agent,
         .deps = &deps,
@@ -300,14 +301,16 @@ pub fn run(
             .context_limits = config.tool_context.context_limits,
         },
         .prompt = prompt,
+        .failure_cause_name = &failure_cause,
     }) catch |err| {
         const mapped: execution.ServiceError = switch (err) {
             error.OutOfMemory => error.OutOfMemory,
             error.Cancelled => error.Cancelled,
             else => error.ProviderFailed,
         };
-        turn.setFailureDiagnostic("agent_turn_failed", @errorName(err));
-        debug_trace.eventf("subagent", "child_execution_failed", trace_context, "child_id={s} err={s}", .{ turn.child_id orelse "unknown", @errorName(err) });
+        const cause = failure_cause orelse @errorName(err);
+        turn.setFailureDiagnostic("agent_turn_failed", cause);
+        debug_trace.eventf("subagent", "child_execution_failed", trace_context, "child_id={s} err={s}", .{ turn.child_id orelse "unknown", cause });
         return mapped;
     };
     return finalRunOutcome(context.turn_outcome);

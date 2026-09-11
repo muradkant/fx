@@ -24,6 +24,10 @@ pub const Request = struct {
     lifecycle: runtime_lifecycle.LifecycleContext,
     config: runtime_config.Config,
     prompt: worker_runtime.QueuedPrompt,
+    /// Optional out-param receiving the specific error name mapped to
+    /// AgentExecutionFailed. It points at the static error-name table, so no
+    /// allocation is needed, and it is left unchanged on success.
+    failure_cause_name: ?*?[]const u8 = null,
 };
 
 pub fn run(request: Request) Error!void {
@@ -34,10 +38,13 @@ pub fn run(request: Request) Error!void {
         request.lifecycle,
         request.config,
         request.prompt,
-    ) catch |err| return switch (err) {
-        error.OutOfMemory => error.OutOfMemory,
-        error.Cancelled => error.Cancelled,
-        else => error.AgentExecutionFailed,
+    ) catch |err| {
+        if (request.failure_cause_name) |out| out.* = @errorName(err);
+        return switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            error.Cancelled => error.Cancelled,
+            else => error.AgentExecutionFailed,
+        };
     };
 }
 
