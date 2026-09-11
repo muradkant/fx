@@ -3,17 +3,17 @@ const host = @import("fx_orchestration_host");
 const runtime_mod = @import("runtime.zig");
 const team_document = @import("domain/team_document.zig");
 const definition_editor = @import("definition_editor.zig");
-const AltRuntime = runtime_mod.Runtime(host);
+const FixerRuntime = runtime_mod.Runtime(host);
 
 pub const DefinitionEditor = definition_editor.Editor;
 
 pub fn descriptor() host.ExtensionDescriptor {
     return .{
-        .id = "alt",
-        .display_name = "ALT",
-        .slash_command = "/alt",
-        .summary = "resume ALT or manage Teams",
-        .usage = "/alt [off|teams|new]",
+        .id = "fixer",
+        .display_name = "Fixer",
+        .slash_command = "/fixer",
+        .summary = "resume Fixer or manage Teams",
+        .usage = "/fixer [off|teams|new]",
         .definition_kind = "team",
         .definition_collection = "teams",
     };
@@ -21,7 +21,7 @@ pub fn descriptor() host.ExtensionDescriptor {
 
 const Adapter = struct {
     team: team_document.Document,
-    runtime: AltRuntime,
+    runtime: FixerRuntime,
 
     fn dispatch(context: *anyopaque, event: host.HostEvent, sink: host.IntentSink) !void {
         const self: *Adapter = @ptrCast(@alignCast(context));
@@ -128,7 +128,7 @@ pub fn create(allocator: std.mem.Allocator, options: host.CreateOptions) !host.E
     const adapter = try allocator.create(Adapter);
     adapter.* = .{
         .team = team,
-        .runtime = AltRuntime.init(allocator, team.value),
+        .runtime = FixerRuntime.init(allocator, team.value),
     };
     return .{ .context = adapter, .vtable = &vtable };
 }

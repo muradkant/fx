@@ -144,8 +144,8 @@ pub fn run(
             .advertised_tool_names = config.advertised_tool_names,
             .advertised_functions = config.advertised_functions,
             .response_format = if (parsed_schema) |parsed| .{
-                .name = "alt_orchestration_outcome",
-                .description = "A strict orchestration outcome selected by the active ALT role.",
+                .name = "fixer_orchestration_outcome",
+                .description = "A strict orchestration outcome selected by the active Fixer role.",
                 .schema = parsed.value,
             } else null,
             .provider_capabilities = config.tool_context.provider_capabilities,

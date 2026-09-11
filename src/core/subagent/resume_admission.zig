@@ -114,7 +114,7 @@ const CatalogWorker = struct {
                 },
             };
             if (!managed) {
-                // Read the ALT binding sidecar inside the before/after
+                // Read the Fixer binding sidecar inside the before/after
                 // fingerprint window so a concurrent binding write forces a
                 // cache miss instead of publishing a stale summary/binding
                 // pair. A malformed sidecar is deterministic for the file's
@@ -212,7 +212,7 @@ pub fn listActionableCatalog(
         if (stop_requested.load(.acquire)) return error.Cancelled;
         if (entry.fingerprint != null) cacheable += 1;
         switch (entry.value) {
-            // The worker or a reused cache row already attached the ALT
+            // The worker or a reused cache row already attached the Fixer
             // binding, so cloning preserves it without re-reading the
             // sidecar on this deliberately cached path.
             .visible => |summary| {
@@ -600,7 +600,7 @@ test "actionable catalog preserves discovery and child visibility" {
     try std.testing.expect((try catalog_cache.Writer.init(read_only)) == null);
 }
 
-test "actionable catalog serves ALT bindings from workers and the cache" {
+test "actionable catalog serves Fixer bindings from workers and the cache" {
     const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -631,8 +631,8 @@ test "actionable catalog serves ALT bindings from workers and the cache" {
     var writable = try store.startWritableSession(alloc, durable);
     writable.deinit(alloc);
     const binding = session_store.OrchestrationBinding{
-        .extension_id = "alt",
-        .extension_name = "ALT",
+        .extension_id = "fixer",
+        .extension_name = "Fixer",
         .definition_kind = "team",
         .definition_id = "engineering",
         .definition_revision = 3,

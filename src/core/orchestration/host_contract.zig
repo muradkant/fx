@@ -92,15 +92,15 @@ pub const UserTurn = struct {
     session_id: []const u8,
     /// Stable fx-owned handle for the fully canonicalized turn. An agent run
     /// that cites this ID receives the original images, skill bindings, and
-    /// authority-bearing input rather than an ALT reconstruction of them.
+    /// authority-bearing input rather than a Fixer reconstruction of them.
     source_turn_id: u64,
     text: []const u8,
-    /// Stable fx-owned references drawn only from this canonical turn. ALT may
+    /// Stable fx-owned references drawn only from this canonical turn. Fixer may
     /// pass a selected subset to projected specialist input; the host resolves
     /// and re-authorizes the bytes at run admission.
     attachment_references: []const []const u8 = &.{},
     /// Full fx-owned durable conversation history, translated into neutral
-    /// semantic records. It is borrowed only for dispatch; ALT must copy or
+    /// semantic records. It is borrowed only for dispatch; Fixer must copy or
     /// project anything it retains.
     conversation_history: []const ConversationTurn = &.{},
 };
@@ -138,7 +138,7 @@ pub const AgentRunAuthority = struct {
 
 /// Exact identity inside one authenticated unified provider catalog. Route and
 /// name are opaque provider-owned values; neither may be reconstructed from an
-/// ALT-local alias.
+/// Fixer-local alias.
 pub const ModelSelection = struct {
     provider_id: []const u8,
     route: []const u8,
@@ -153,7 +153,7 @@ pub const ProjectedInput = struct {
 
 pub const VisibleInput = union(enum) {
     /// Resolve the full canonical fx turn named by AgentRunAuthority, including
-    /// images and skill bindings, then append only this ALT-owned context.
+    /// images and skill bindings, then append only this Fixer-owned context.
     canonical_turn: struct { supplemental_context: []const u8 = "" },
     /// Do not inject canonical user text, images, skills, or history. Only this
     /// content and these explicitly selected, authority-checked attachments are

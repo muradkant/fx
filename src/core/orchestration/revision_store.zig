@@ -420,7 +420,7 @@ test "revision store preserves immutable history through edit and delete" {
     const home = try io_mod.dirRealpathAlloc(alloc, tmp.dir, "home");
     defer alloc.free(home);
 
-    var store = try Store.initFromHome(home, "alt", "teams");
+    var store = try Store.initFromHome(home, "fixer", "teams");
     defer store.deinit();
     const first = "{\"revision\":1}";
     try store.put(alloc, .{
@@ -469,7 +469,7 @@ test "revision store rejects gaps replacement and digest mismatch" {
     try tmp.dir.createDir(std.testing.io, "home", .default_dir);
     const home = try io_mod.dirRealpathAlloc(alloc, tmp.dir, "home");
     defer alloc.free(home);
-    var store = try Store.initFromHome(home, "alt", "teams");
+    var store = try Store.initFromHome(home, "fixer", "teams");
     defer store.deinit();
 
     const source = "one";

@@ -4764,7 +4764,7 @@ test("Cline account login exposes free and ClinePass routes without an invented 
     expect(chat.clientVersion).not.toBeNull();
     expect(chat.userAgent).toBe(`Cline/${chat.clientVersion}`);
     expect(chat.coreVersion).toBe(chat.clientVersion);
-    // --no-save intentionally has no session identity. Interactive and ALT
+    // --no-save intentionally has no session identity. Interactive and Fixer
     // runs carry their fx session ID in this provider header.
     expect(chat.taskId).toBeNull();
     expect(chat.referer).toBe("https://cline.bot");

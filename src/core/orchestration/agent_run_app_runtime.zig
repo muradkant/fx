@@ -50,7 +50,7 @@ fn orchestrationModelId(
     };
 }
 
-test "ALT preserves complete Cline model identities" {
+test "Fixer preserves complete Cline model identities" {
     const free = try orchestrationModelId(std.testing.allocator, .cline, "z-ai", "glm-5.3-flash");
     defer std.testing.allocator.free(free);
     try std.testing.expectEqualStrings("z-ai/glm-5.3-flash", free);

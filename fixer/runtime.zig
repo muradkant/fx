@@ -10,7 +10,7 @@ const test_host = @import("fx_orchestration_host");
 // An invalid terminal control envelope gets one different recovery strategy:
 // an explicit correction containing the observed defect and prior output.
 // Transport failures are never retried here, and valid Team work is not bound
-// by an invented ALT iteration ceiling.
+// by an invented Fixer iteration ceiling.
 const max_protocol_corrections: u32 = 1;
 const max_consultation_depth: u8 = 16;
 
@@ -144,7 +144,7 @@ pub fn Runtime(comptime host: type) type {
                 try self.trace(sink, .{ .event = "activation_refused", .detail = "unified_provider_missing" });
                 try sink.emit(.{ .notice = .{
                     .tone = .failure,
-                    .text = "ALT needs Vercel AI Gateway or OpenCode Go/Zen.",
+                    .text = "Fixer needs Vercel AI Gateway or OpenCode Go/Zen.",
                 } });
                 return;
             }
@@ -152,7 +152,7 @@ pub fn Runtime(comptime host: type) type {
                 try self.trace(sink, .{ .event = "activation_idempotent" });
                 try sink.emit(.{ .notice = .{
                     .tone = .info,
-                    .text = "ALT mode is already enabled.",
+                    .text = "Fixer mode is already enabled.",
                 } });
                 return;
             }
@@ -162,7 +162,7 @@ pub fn Runtime(comptime host: type) type {
             self.conversation_id = conversation_id;
             self.active = true;
             try self.trace(sink, .{ .event = "activation_accepted" });
-            try sink.emit(.{ .mode_entered = .{ .notice = "ALT mode enabled." } });
+            try sink.emit(.{ .mode_entered = .{ .notice = "Fixer mode enabled." } });
         }
 
         fn leave(self: *Self, sink: host.IntentSink) !void {
@@ -170,7 +170,7 @@ pub fn Runtime(comptime host: type) type {
                 try self.trace(sink, .{ .event = "deactivation_idempotent" });
                 try sink.emit(.{ .notice = .{
                     .tone = .info,
-                    .text = "ALT mode is already disabled.",
+                    .text = "Fixer mode is already disabled.",
                 } });
                 return;
             }
@@ -195,14 +195,14 @@ pub fn Runtime(comptime host: type) type {
             }
             self.active = false;
             try self.trace(sink, .{ .event = "deactivation_completed" });
-            try sink.emit(.{ .mode_left = .{ .notice = "ALT mode disabled." } });
+            try sink.emit(.{ .mode_left = .{ .notice = "Fixer mode disabled." } });
         }
 
         fn beginUserTurn(self: *Self, turn: host.UserTurn, sink: host.IntentSink) !void {
             if (!self.active) {
                 try sink.emit(.{ .notice = .{
                     .tone = .failure,
-                    .text = "Enable ALT mode before submitting an ALT turn.",
+                    .text = "Enable Fixer mode before submitting a Fixer turn.",
                 } });
                 return;
             }
@@ -211,7 +211,7 @@ pub fn Runtime(comptime host: type) type {
             {
                 try sink.emit(.{ .notice = .{
                     .tone = .failure,
-                    .text = "ALT rejected an empty or unidentifiable user turn.",
+                    .text = "Fixer rejected an empty or unidentifiable user turn.",
                 } });
                 return;
             }
@@ -220,7 +220,7 @@ pub fn Runtime(comptime host: type) type {
                     try self.trace(sink, self.sessionTrace("user_turn_refused", "session_running"));
                     try sink.emit(.{ .notice = .{
                         .tone = .warning,
-                        .text = "The current ALT turn is still running.",
+                        .text = "The current Fixer turn is still running.",
                     } });
                     return;
                 }
@@ -281,14 +281,14 @@ pub fn Runtime(comptime host: type) type {
             const session = if (self.session) |*value| value else {
                 try sink.emit(.{ .notice = .{
                     .tone = .warning,
-                    .text = "There is no active ALT turn to steer.",
+                    .text = "There is no active Fixer turn to steer.",
                 } });
                 return;
             };
             if (session.projection.terminal()) {
                 try sink.emit(.{ .notice = .{
                     .tone = .warning,
-                    .text = "The ALT turn already finished; submit a new turn instead.",
+                    .text = "The Fixer turn already finished; submit a new turn instead.",
                 } });
                 return;
             }
@@ -296,7 +296,7 @@ pub fn Runtime(comptime host: type) type {
             if (instruction.source_turn_id == 0 or text.len == 0) {
                 try sink.emit(.{ .notice = .{
                     .tone = .failure,
-                    .text = "ALT rejected an empty or unidentifiable instruction.",
+                    .text = "Fixer rejected an empty or unidentifiable instruction.",
                 } });
                 return;
             }
@@ -304,7 +304,7 @@ pub fn Runtime(comptime host: type) type {
                 if (existing == instruction.source_turn_id) {
                     try sink.emit(.{ .notice = .{
                         .tone = .warning,
-                        .text = "ALT ignored a duplicate instruction.",
+                        .text = "Fixer ignored a duplicate instruction.",
                     } });
                     return;
                 }
@@ -384,7 +384,7 @@ pub fn Runtime(comptime host: type) type {
                 caused_by,
             ));
             const context_projection =
-                "A new in-session user instruction was accepted. It is part of the same ALT session and supersedes conflicting earlier current-turn state.";
+                "A new in-session user instruction was accepted. It is part of the same Fixer session and supersedes conflicting earlier current-turn state.";
             try self.startAgentRun(
                 session.projection.leader_id,
                 .{ .leader = .{ .agent_id = session.projection.leader_id } },
@@ -1734,7 +1734,7 @@ pub fn Runtime(comptime host: type) type {
             ));
             try sink.emit(.{ .notice = .{
                 .tone = .failure,
-                .text = "ALT rejected an invalid agent coordination result.",
+                .text = "Fixer rejected an invalid agent coordination result.",
             } });
             try sink.emit(.turn_failed);
         }
@@ -2589,7 +2589,7 @@ test "one user turn can hand leadership to a peer and publish that peer answer" 
     try std.testing.expectEqualStrings(peer_run_id, capture.traceRun(11));
 }
 
-test "leadership movement has no invented ALT handoff ceiling" {
+test "leadership movement has no invented Fixer handoff ceiling" {
     const Capture = struct {
         run_count: usize = 0,
         run_ids: [8][128]u8 = undefined,

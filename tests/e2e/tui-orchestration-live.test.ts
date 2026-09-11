@@ -17,13 +17,13 @@ const AUTH_SOURCE = join(homedir(), ".fx", "opencode-auth.json");
 const ENABLED = process.env.FX_ORCHESTRATION_LIVE === "1";
 const SKIP = !ENABLED || !tmuxAvailable() || !existsSync(AUTH_SOURCE);
 const TIMEOUT = 180_000;
-const ANSWER_MARKER = "CRUCIBLE_ALT_LIVE_7F31";
-const CONTEXT_SETUP_MARKER = "CRUCIBLE_ALT_CONTEXT_READY_2B19";
-const CONTEXT_MEMORY_MARKER = "CRUCIBLE_ALT_CONTEXT_MEMORY_5D2C";
-const PEER_ANSWER_MARKER = "CRUCIBLE_ALT_PEER_DONE_A821";
-const TOOL_ANSWER_MARKER = "CRUCIBLE_ALT_TOOL_DONE_91C4";
-const TOOL_FILE_CONTENT = "ALT_FX_PERMISSION_BRIDGE_42";
-const STEERING_ANSWER_MARKER = "CRUCIBLE_ALT_LIVE_STEERING_6E93";
+const ANSWER_MARKER = "CRUCIBLE_FIXER_LIVE_7F31";
+const CONTEXT_SETUP_MARKER = "CRUCIBLE_FIXER_CONTEXT_READY_2B19";
+const CONTEXT_MEMORY_MARKER = "CRUCIBLE_FIXER_CONTEXT_MEMORY_5D2C";
+const PEER_ANSWER_MARKER = "CRUCIBLE_FIXER_PEER_DONE_A821";
+const TOOL_ANSWER_MARKER = "CRUCIBLE_FIXER_TOOL_DONE_91C4";
+const TOOL_FILE_CONTENT = "FIXER_FX_PERMISSION_BRIDGE_42";
+const STEERING_ANSWER_MARKER = "CRUCIBLE_FIXER_LIVE_STEERING_6E93";
 
 let session: TmuxSession | null = null;
 const tempDirs: string[] = [];
@@ -48,11 +48,11 @@ async function waitForTerminalTrace(
     if (latest.includes("event=agent_protocol_rejected") ||
         latest.includes("event=agent_run_failed") ||
         latest.includes("event=specialist_run_failed")) {
-      throw new Error(`ALT live run failed before publication.\n${latest}`);
+      throw new Error(`Fixer live run failed before publication.\n${latest}`);
     }
     await Bun.sleep(50);
   }
-  throw new Error(`Timed out waiting for ALT terminal trace.\n${latest}`);
+  throw new Error(`Timed out waiting for Fixer terminal trace.\n${latest}`);
 }
 
 async function waitForTerminalTraceEvent(
@@ -67,7 +67,7 @@ async function waitForTerminalTraceEvent(
     if (latest.includes(event)) return latest;
     if (latest.includes("event=agent_protocol_rejected") ||
         latest.includes("event=specialist_run_failed")) {
-      throw new Error(`ALT live run failed before ${event}.\n${latest}`);
+      throw new Error(`Fixer live run failed before ${event}.\n${latest}`);
     }
     await Bun.sleep(50);
   }
@@ -84,11 +84,11 @@ afterEach(async () => {
   }
 });
 
-describe.skipIf(SKIP)("tui: live ALT Crucible", () => {
+describe.skipIf(SKIP)("tui: live Fixer Crucible", () => {
   test(
     "a real OpenCode leader run crosses the fx host and publishes a terminal answer",
     async () => {
-      const root = mkdtempSync(join(tmpdir(), "fx-alt-live-crucible-"));
+      const root = mkdtempSync(join(tmpdir(), "fx-fixer-live-crucible-"));
       const home = join(root, "home");
       const fxHome = join(home, ".fx");
       const workspace = join(root, "workspace");
@@ -116,8 +116,8 @@ describe.skipIf(SKIP)("tui: live ALT Crucible", () => {
 
       try {
         await session.waitForComposer(15_000);
-        await session.sendText("/alt");
-        await session.waitForText("ALT mode enabled.", 10_000);
+        await session.sendText("/fixer");
+        await session.waitForText("Fixer mode enabled.", 10_000);
         await session.waitForComposer(10_000);
         await session.sendText(
           `This is a runtime probe. Do not call tools, peers, or specialists. Answer now with exactly ${ANSWER_MARKER} and no other text.`,
@@ -177,7 +177,7 @@ describe.skipIf(SKIP)("tui: live ALT Crucible", () => {
         );
         const cleanupIndex = tempDirs.indexOf(root);
         if (cleanupIndex >= 0) tempDirs.splice(cleanupIndex, 1);
-        console.error(`retained live ALT failure artifacts at ${root}`);
+        console.error(`retained live Fixer failure artifacts at ${root}`);
         throw error;
       }
     },
@@ -185,9 +185,9 @@ describe.skipIf(SKIP)("tui: live ALT Crucible", () => {
   );
 
   test(
-    "a second real OpenCode turn receives ALT's durable conversation view",
+    "a second real OpenCode turn receives Fixer's durable conversation view",
     async () => {
-      const root = mkdtempSync(join(tmpdir(), "fx-alt-live-context-crucible-"));
+      const root = mkdtempSync(join(tmpdir(), "fx-fixer-live-context-crucible-"));
       const home = join(root, "home");
       const fxHome = join(home, ".fx");
       const workspace = join(root, "workspace");
@@ -215,8 +215,8 @@ describe.skipIf(SKIP)("tui: live ALT Crucible", () => {
 
       try {
         await session.waitForComposer(15_000);
-        await session.sendText("/alt");
-        await session.waitForText("ALT mode enabled.", 10_000);
+        await session.sendText("/fixer");
+        await session.waitForText("Fixer mode enabled.", 10_000);
         await session.waitForComposer(10_000);
         await session.sendText(
           `Remember the exact nonce ${CONTEXT_MEMORY_MARKER} for my next turn. Do not call tools, peers, or specialists. Answer now with exactly ${CONTEXT_SETUP_MARKER}.`,
@@ -226,7 +226,7 @@ describe.skipIf(SKIP)("tui: live ALT Crucible", () => {
         await session.waitForComposer(15_000);
 
         await session.sendText(
-          "Use the prior ALT conversation view. Do not call tools, peers, or specialists. Answer with exactly the nonce I asked you to remember in my previous turn and no other text.",
+          "Use the prior Fixer conversation view. Do not call tools, peers, or specialists. Answer with exactly the nonce I asked you to remember in my previous turn and no other text.",
         );
         const trace = await waitForTerminalTrace(tracePath, TIMEOUT, 2);
         await session.waitForText(CONTEXT_MEMORY_MARKER, 15_000);
@@ -271,7 +271,7 @@ describe.skipIf(SKIP)("tui: live ALT Crucible", () => {
         );
         const cleanupIndex = tempDirs.indexOf(root);
         if (cleanupIndex >= 0) tempDirs.splice(cleanupIndex, 1);
-        console.error(`retained live ALT context failure artifacts at ${root}`);
+        console.error(`retained live Fixer context failure artifacts at ${root}`);
         throw error;
       }
     },
@@ -281,7 +281,7 @@ describe.skipIf(SKIP)("tui: live ALT Crucible", () => {
   test(
     "a real OpenCode peer consultation returns evidence without moving leadership",
     async () => {
-      const root = mkdtempSync(join(tmpdir(), "fx-alt-live-peer-crucible-"));
+      const root = mkdtempSync(join(tmpdir(), "fx-fixer-live-peer-crucible-"));
       const home = join(root, "home");
       const fxHome = join(home, ".fx");
       const workspace = join(root, "workspace");
@@ -309,8 +309,8 @@ describe.skipIf(SKIP)("tui: live ALT Crucible", () => {
 
       try {
         await session.waitForComposer(15_000);
-        await session.sendText("/alt");
-        await session.waitForText("ALT mode enabled.", 10_000);
+        await session.sendText("/fixer");
+        await session.waitForText("Fixer mode enabled.", 10_000);
         await session.waitForComposer(10_000);
         await session.sendText(
           `Keep Engineering as sole leader. Before answering, consult the authorized coding peer exactly once for a concise correctness check. Do not hand off leadership and do not call a specialist. After the consultation returns, answer with exactly ${PEER_ANSWER_MARKER}.`,
@@ -371,7 +371,7 @@ describe.skipIf(SKIP)("tui: live ALT Crucible", () => {
         );
         const cleanupIndex = tempDirs.indexOf(root);
         if (cleanupIndex >= 0) tempDirs.splice(cleanupIndex, 1);
-        console.error(`retained live ALT peer failure artifacts at ${root}`);
+        console.error(`retained live Fixer peer failure artifacts at ${root}`);
         throw error;
       }
     },
@@ -379,13 +379,13 @@ describe.skipIf(SKIP)("tui: live ALT Crucible", () => {
   );
 
   test(
-    "a real OpenCode tool call pauses in fx ask mode and resumes the exact ALT run",
+    "a real OpenCode tool call pauses in fx ask mode and resumes the exact Fixer run",
     async () => {
-      const root = mkdtempSync(join(tmpdir(), "fx-alt-live-tool-crucible-"));
+      const root = mkdtempSync(join(tmpdir(), "fx-fixer-live-tool-crucible-"));
       const home = join(root, "home");
       const fxHome = join(home, ".fx");
       const workspace = join(root, "workspace");
-      const target = join(workspace, "alt-crucible.txt");
+      const target = join(workspace, "fixer-crucible.txt");
       const stderrPath = join(root, "stderr.log");
       const tracePath = join(root, "causal.trace.log");
       mkdirSync(fxHome, { recursive: true });
@@ -411,11 +411,11 @@ describe.skipIf(SKIP)("tui: live ALT Crucible", () => {
 
       try {
         await session.waitForComposer(15_000);
-        await session.sendText("/alt");
-        await session.waitForText("ALT mode enabled.", 10_000);
+        await session.sendText("/fixer");
+        await session.waitForText("Fixer mode enabled.", 10_000);
         await session.waitForComposer(10_000);
         await session.sendText(
-          `I want the authorized coding peer to own and execute this exact turn. Use the write_file tool to create alt-crucible.txt with exact content ${JSON.stringify(TOOL_FILE_CONTENT)}. Only after that tool succeeds, answer with exactly ${TOOL_ANSWER_MARKER}.`,
+          `I want the authorized coding peer to own and execute this exact turn. Use the write_file tool to create fixer-crucible.txt with exact content ${JSON.stringify(TOOL_FILE_CONTENT)}. Only after that tool succeeds, answer with exactly ${TOOL_ANSWER_MARKER}.`,
         );
 
         await session.waitForText("Apply this change?", TIMEOUT);
@@ -463,7 +463,7 @@ describe.skipIf(SKIP)("tui: live ALT Crucible", () => {
         );
         const cleanupIndex = tempDirs.indexOf(root);
         if (cleanupIndex >= 0) tempDirs.splice(cleanupIndex, 1);
-        console.error(`retained live ALT tool failure artifacts at ${root}`);
+        console.error(`retained live Fixer tool failure artifacts at ${root}`);
         throw error;
       }
     },
@@ -473,7 +473,7 @@ describe.skipIf(SKIP)("tui: live ALT Crucible", () => {
   test(
     "a real OpenCode leader is replaced by an in-session user instruction",
     async () => {
-      const root = mkdtempSync(join(tmpdir(), "fx-alt-live-steering-crucible-"));
+      const root = mkdtempSync(join(tmpdir(), "fx-fixer-live-steering-crucible-"));
       const home = join(root, "home");
       const fxHome = join(home, ".fx");
       const workspace = join(root, "workspace");
@@ -501,8 +501,8 @@ describe.skipIf(SKIP)("tui: live ALT Crucible", () => {
 
       try {
         await session.waitForComposer(15_000);
-        await session.sendText("/alt");
-        await session.waitForText("ALT mode enabled.", 10_000);
+        await session.sendText("/fixer");
+        await session.waitForText("Fixer mode enabled.", 10_000);
         await session.waitForComposer(10_000);
         await session.sendText(
           "Begin a detailed architecture review of the workspace. Do not call tools, peers, or specialists, and do not answer with the later steering marker unless I explicitly provide it.",
@@ -572,7 +572,7 @@ describe.skipIf(SKIP)("tui: live ALT Crucible", () => {
         );
         const cleanupIndex = tempDirs.indexOf(root);
         if (cleanupIndex >= 0) tempDirs.splice(cleanupIndex, 1);
-        console.error(`retained live ALT steering failure artifacts at ${root}`);
+        console.error(`retained live Fixer steering failure artifacts at ${root}`);
         throw error;
       }
     },

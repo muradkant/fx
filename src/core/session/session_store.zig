@@ -4593,7 +4593,7 @@ fn initTempStore(alloc: Allocator, tmp: *std.testing.TmpDir) !TempStore {
     return .{ .home = home, .workspace = workspace, .store = store };
 }
 
-test "session mode lookup distinguishes latest ALT and native conversations" {
+test "session mode lookup distinguishes latest Fixer and native conversations" {
     const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -4601,30 +4601,30 @@ test "session mode lookup distinguishes latest ALT and native conversations" {
     defer ctx.deinit(alloc);
 
     try writeSummaryFixture(alloc, ctx.store, "native", ctx.workspace, 30, 1);
-    try writeSummaryFixture(alloc, ctx.store, "alt-old", ctx.workspace, 20, 1);
-    try writeSummaryFixture(alloc, ctx.store, "alt-new", ctx.workspace, 40, 1);
+    try writeSummaryFixture(alloc, ctx.store, "fixer-old", ctx.workspace, 20, 1);
+    try writeSummaryFixture(alloc, ctx.store, "fixer-new", ctx.workspace, 40, 1);
     const descriptor = OrchestrationBinding{
-        .extension_id = "alt",
-        .extension_name = "ALT",
+        .extension_id = "fixer",
+        .extension_name = "Fixer",
         .definition_kind = "team",
         .definition_id = "engineering",
         .definition_revision = 2,
         .definition_digest = [_]u8{'a'} ** 64,
         .display_name = "Engineering",
     };
-    try ctx.store.writeOrchestrationBinding(alloc, "alt-old", descriptor);
+    try ctx.store.writeOrchestrationBinding(alloc, "fixer-old", descriptor);
     var newest = descriptor;
     newest.definition_revision = 3;
     newest.definition_digest = [_]u8{'b'} ** 64;
-    try ctx.store.writeOrchestrationBinding(alloc, "alt-new", newest);
+    try ctx.store.writeOrchestrationBinding(alloc, "fixer-new", newest);
 
-    var latest_alt = (try ctx.store.latestOrchestrationSession(alloc, "alt")) orelse
+    var latest_fixer = (try ctx.store.latestOrchestrationSession(alloc, "fixer")) orelse
         return error.TestExpectedSession;
-    defer latest_alt.deinit(alloc);
-    try std.testing.expectEqualStrings("alt-new", latest_alt.id);
-    try std.testing.expectEqual(@as(u32, 3), latest_alt.binding.definition_revision);
+    defer latest_fixer.deinit(alloc);
+    try std.testing.expectEqualStrings("fixer-new", latest_fixer.id);
+    try std.testing.expectEqual(@as(u32, 3), latest_fixer.binding.definition_revision);
 
-    const latest_native = (try ctx.store.latestNativeSession(alloc, "alt-new")) orelse
+    const latest_native = (try ctx.store.latestNativeSession(alloc, "fixer-new")) orelse
         return error.TestExpectedSession;
     defer alloc.free(latest_native);
     try std.testing.expectEqualStrings("native", latest_native);

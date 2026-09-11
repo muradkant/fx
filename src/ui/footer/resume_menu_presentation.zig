@@ -377,7 +377,7 @@ fn composeTitleRow(
     const metadata_overhead = prefix_width + picker_presentation.inline_picker_column_gap_width + metadata_width;
     const available_title_width = content_width -| metadata_overhead;
 
-    // The row renders the ALT-pinned revision as part of the title, so the
+    // The row renders the Fixer-pinned revision as part of the title, so the
     // measured width must describe that exact text or the shared column grid
     // middle-ellipsizes a label that had ample room.
     var owned_title: ?[]u8 = null;
@@ -609,10 +609,10 @@ test "resume menu renders each session on one line with a right metadata cluster
     try std.testing.expect(std.mem.find(u8, title.items, "○") == null);
 }
 
-test "resume menu labels ALT sessions with the pinned Team revision" {
+test "resume menu labels Fixer sessions with the pinned Team revision" {
     const alloc = std.testing.allocator;
     const summaries = [_]session_store.SessionSummary{.{
-        .id = @constCast("alt-session"),
+        .id = @constCast("fixer-session"),
         .workspace_root = @constCast("/tmp/project"),
         .title = @constCast("Implement the parser"),
         .created_at_ms = 1,
@@ -620,8 +620,8 @@ test "resume menu labels ALT sessions with the pinned Team revision" {
         .conversation_language = .literal("en"),
         .history_len = 3,
         .orchestration = .{
-            .extension_id = @constCast("alt"),
-            .extension_name = @constCast("ALT"),
+            .extension_id = @constCast("fixer"),
+            .extension_name = @constCast("Fixer"),
             .definition_kind = @constCast("team"),
             .definition_id = @constCast("engineering"),
             .definition_revision = 7,
@@ -639,7 +639,7 @@ test "resume menu labels ALT sessions with the pinned Team revision" {
     var title = try composeSessionMenuRow(alloc, projection, 2, 120, 4);
     defer title.deinit(alloc);
     try std.testing.expect(
-        std.mem.find(u8, title.items, "ALT · Engineering r7 · Implement the parser") != null,
+        std.mem.find(u8, title.items, "Fixer · Engineering r7 · Implement the parser") != null,
     );
 }
 

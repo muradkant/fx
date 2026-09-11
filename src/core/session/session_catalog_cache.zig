@@ -11,7 +11,7 @@ const summary_codec = @import("session_summary_codec.zig");
 const Allocator = std.mem.Allocator;
 const Sha256 = std.crypto.hash.sha2.Sha256;
 // Disposable v5 proofs bind replay and the legacy route gates to one stat
-// window. v5 adds the ALT orchestration binding to picker rows and folds
+// window. v5 adds the Fixer orchestration binding to picker rows and folds
 // the binding sidecar into the picker fingerprint; v4 caches rebuild once.
 const magic = "fx-resume-catalog-v5\n";
 const file_name = ".resume-catalog";
@@ -77,7 +77,7 @@ const Summary = struct {
     orchestration: ?Orchestration = null,
     orchestration_binding_invalid: bool = false,
 
-    /// Cached ALT session binding. Slices borrow the loaded cache document;
+    /// Cached Fixer session binding. Slices borrow the loaded cache document;
     /// `clone` converts them into an owned summary binding.
     const Orchestration = struct {
         extension_id: []const u8,
@@ -425,7 +425,7 @@ pub fn fingerprint(dir: std.Io.Dir, id: []const u8) !?Fingerprint {
             } else digest.update(&.{0});
         }
     } else digest.update(&.{0});
-    // The ALT orchestration sidecar is picker-visible metadata: fold its
+    // The Fixer orchestration sidecar is picker-visible metadata: fold its
     // presence and identity into the same stat window so binding writes,
     // rotations, and removals invalidate cached rows.
     const binding_path = try std.fmt.bufPrint(&path_buffer, "{s}/{s}", .{ id, orchestration_binding.sidecar_file });
@@ -878,8 +878,8 @@ test "catalog fingerprint observes orchestration sidecar creation, replacement, 
     ) };
     defer dir.close();
     try orchestration_binding.write(alloc, &dir, .{
-        .extension_id = "alt",
-        .extension_name = "ALT",
+        .extension_id = "fixer",
+        .extension_name = "Fixer",
         .definition_kind = "team",
         .definition_id = "engineering",
         .definition_revision = 3,
@@ -889,8 +889,8 @@ test "catalog fingerprint observes orchestration sidecar creation, replacement, 
     const created = (try fingerprint(tmp.dir, "session")).?;
     try std.testing.expect(!std.mem.eql(u8, &bare, &created));
     try orchestration_binding.write(alloc, &dir, .{
-        .extension_id = "alt",
-        .extension_name = "ALT",
+        .extension_id = "fixer",
+        .extension_name = "Fixer",
         .definition_kind = "team",
         .definition_id = "engineering",
         .definition_revision = 4,
@@ -911,8 +911,8 @@ test "catalog cache round trips orchestration bindings on warm reuse" {
     var writer = Writer{ .dir = .{ .dir = try tmp.dir.openDir(std.testing.io, ".", .{ .iterate = true }) } };
     defer writer.deinit();
     const encoded = try orchestration_binding.encode(alloc, .{
-        .extension_id = "alt",
-        .extension_name = "ALT",
+        .extension_id = "fixer",
+        .extension_name = "Fixer",
         .definition_kind = "team",
         .definition_id = "engineering",
         .definition_revision = 7,
@@ -967,8 +967,8 @@ test "catalog cache rejects malformed cached orchestration bindings" {
     var writer = Writer{ .dir = .{ .dir = try tmp.dir.openDir(std.testing.io, ".", .{ .iterate = true }) } };
     defer writer.deinit();
     const encoded = try orchestration_binding.encode(alloc, .{
-        .extension_id = "alt",
-        .extension_name = "ALT",
+        .extension_id = "fixer",
+        .extension_name = "Fixer",
         .definition_kind = "team",
         .definition_id = "engineering",
         .definition_revision = 7,

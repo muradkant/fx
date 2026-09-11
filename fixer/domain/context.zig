@@ -25,7 +25,7 @@ const ArchiveView = struct {
 
 /// Builds a byte-bounded semantic view from fx-owned durable records. The
 /// newest records survive first. No fx history object, attachment path,
-/// execution memory, or credential crosses into ALT's retained state.
+/// execution memory, or credential crosses into Fixer's retained state.
 pub fn conversationProjection(
     comptime Host: type,
     allocator: std.mem.Allocator,

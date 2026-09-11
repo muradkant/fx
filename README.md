@@ -13,13 +13,13 @@
  ⣿⣿⣿⠟⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀
 ```
 
-fixer is a fork of [vercel-labs/fx](https://github.com/vercel-labs/fx) with ALT's recursive multi-model Team orchestration bundled as a first-class, replaceable extension.
+fixer is a fork of [vercel-labs/fx](https://github.com/vercel-labs/fx) with Fixer's recursive multi-model Team orchestration bundled as a first-class, replaceable extension.
 
-fx remains the harness. Its terminal UI, model clients, credentials, permission engine, tools, filesystem access, process execution, and persistence infrastructure remain native. ALT owns only Team definitions, leadership, consultations, specialist projections, bounded orchestration context, and the rules by which results return.
+fx remains the harness. Its terminal UI, model clients, credentials, permission engine, tools, filesystem access, process execution, and persistence infrastructure remain native. Fixer owns only Team definitions, leadership, consultations, specialist projections, bounded orchestration context, and the rules by which results return.
 
-**Development status:** ALT is experimental but usable through a native guided Team library. It creates, selects, revises, starts, and deletes immutable Teams without exposing their stored JSON documents. Every ALT session is pinned to the exact Team revision that created it and remains resumable after later revisions or deletion.
+**Development status:** Fixer is experimental but usable through a native guided Team library. It creates, selects, revises, starts, and deletes immutable Teams without exposing their stored JSON documents. Every Fixer session is pinned to the exact Team revision that created it and remains resumable after later revisions or deletion.
 
-ALT is compiled into normal fixer builds, but **ALT mode is not active when the application starts**. fixer opens in native fx. `/alt` resumes the latest ALT session when one exists and opens the Team library on a fresh installation, `/resume` identifies ALT sessions by their pinned Team revision, and `/alt off` returns to a native fx session.
+Fixer is compiled into normal fixer builds, but **Fixer mode is not active when the application starts**. fixer opens in native fx. `/fixer` resumes the latest Fixer session when one exists and opens the Team library on a fresh installation, `/resume` identifies Fixer sessions by their pinned Team revision, and `/fixer off` returns to a native fx session.
 
 The underlying harness remains optimized for research and embeddability as part of larger systems.
 
@@ -148,34 +148,34 @@ While fx is working, Ctrl+C clears a nonempty composer without interrupting the 
 
 Ctrl+L clears the inline display while keeping the conversation available in Ctrl+O. It preserves your draft and conversation context; `/clear` starts a fresh conversation instead.
 
-## ALT sessions
+## Fixer sessions
 
-Resume the latest ALT session, or open the Team library when none exists:
+Resume the latest Fixer session, or open the Team library when none exists:
 
 ```text
-/alt
+/fixer
 ```
 
 Open Team management directly, or begin a new Team in the guided builder:
 
 ```text
-/alt teams
-/alt new
+/fixer teams
+/fixer new
 ```
 
-The builder configures the Team name, unified provider, primary, peers, specialists, per-role model and instructions, and callable specialist authority. Team and role IDs are opaque, generated automatically, and never presented as authoring fields. Role models are chosen through fx's native live model catalog instead of typed from memory. Write each role's instructions only as that role's identity and expertise: ALT separately supplies every primary and peer with the complete peer roster and exact peer definitions. Every primary and peer can consult every other peer; specialist access is supplied separately and may be exclusive to one of them.
+The builder configures the Team name, unified provider, primary, peers, specialists, per-role model and instructions, and callable specialist authority. Team and role IDs are opaque, generated automatically, and never presented as authoring fields. Role models are chosen through fx's native live model catalog instead of typed from memory. Write each role's instructions only as that role's identity and expertise: Fixer separately supplies every primary and peer with the complete peer roster and exact peer definitions. Every primary and peer can consult every other peer; specialist access is supplied separately and may be exclusive to one of them.
 
 Each role must use a distinct catalog model. New Teams include an unconfigured primary and first peer; configure that peer before adding more. If a role still needs a model when saving, the builder identifies it by name, such as `Peer 2` or `Specialist 1`.
 
-The Team library can start the latest revision in a new conversation, edit it as the next immutable revision in another new conversation, or remove it from the active library. Editing preserves the hidden Team identity. Removed Teams remain available through sessions that already pin one of their revisions. A Team must contain a primary and at least one peer or callable specialist; fixer does not offer a single-agent ALT preset.
+The Team library can start the latest revision in a new conversation, edit it as the next immutable revision in another new conversation, or remove it from the active library. Editing preserves the hidden Team identity. Removed Teams remain available through sessions that already pin one of their revisions. A Team must contain a primary and at least one peer or callable specialist; fixer does not offer a single-agent Fixer preset.
 
 Return to native fx without leaving the application:
 
 ```text
-/alt off
+/fixer off
 ```
 
-Every user turn in ALT mode enters through the Team's configured primary peer. Exactly one peer holds leadership at a time and may answer, hand leadership to an authorized peer, or coordinate Team work.
+Every user turn in Fixer mode enters through the Team's configured primary peer. Exactly one peer holds leadership at a time and may answer, hand leadership to an authorized peer, or coordinate Team work.
 
 ```mermaid
 flowchart TD
@@ -200,7 +200,7 @@ The runtime enforces these boundaries:
 - Specialists are clean-slate leaf calls with bounded projections, selected attachments, and fx's real tools—but no conversation or Team state.
 - Every new user turn starts at the configured primary, regardless of who answered the previous turn.
 
-Team revisions are immutable. Creating a Team starts revision 1 in a new fx conversation; editing it will create the next revision and start another conversation. Existing sessions retain their exact Team revision even after that Team is edited or removed from the active library. Native Codex, Grok, and fx subagents are unavailable inside ALT mode; `/alt off` restores the complete native fx environment.
+Team revisions are immutable. Creating a Team starts revision 1 in a new fx conversation; editing it will create the next revision and start another conversation. Existing sessions retain their exact Team revision even after that Team is edited or removed from the active library. Native Codex, Grok, and fx subagents are unavailable inside Fixer mode; `/fixer off` restores the complete native fx environment.
 
 The status line hides the workspace path and Git branch by default. Enable the `Status line workspace` option in `/settings`, run `/statusline workspace`, or set it in `~/.fx/settings.json`:
 
@@ -324,13 +324,13 @@ Read the [fx documentation](https://fx.sh/docs).
 
 ## Build modes
 
-The normal build selects the bundled ALT implementation but does not activate its mode at startup:
+The normal build selects the bundled Fixer implementation but does not activate its mode at startup:
 
 ```bash
 zig build -Doptimize=ReleaseSafe
 ```
 
-Build the harness without ALT or any orchestration extension:
+Build the harness without Fixer or any orchestration extension:
 
 ```bash
 zig build -Doptimize=ReleaseSafe -Dorchestration=none
@@ -347,7 +347,7 @@ zig build \
 
 Passing `-Dorchestration-root` by itself is retained as shorthand for the custom mode.
 
-Run the full Zig suite with `zig build test`. Run the paired ALT host suite with `zig build test-orchestration-extension -Dtarget=x86_64-linux-musl`. Crucible also builds the product and drives its real TUI through a PTY with deterministic provider fixtures:
+Run the full Zig suite with `zig build test`. Run the paired Fixer host suite with `zig build test-orchestration-extension -Dtarget=x86_64-linux-musl`. Crucible also builds the product and drives its real TUI through a PTY with deterministic provider fixtures:
 
 ```bash
 zig build crucible-host \
@@ -355,7 +355,7 @@ zig build crucible-host \
   -Dbun=/absolute/path/to/bun
 ```
 
-The bundled implementation lives under `alt/`; the ALT-agnostic host contract and lifecycle infrastructure remain under `src/core/orchestration/`. See [CONTRIBUTING.md](CONTRIBUTING.md) for development and contribution guidelines.
+The bundled implementation lives under `fixer/`; the Fixer-agnostic host contract and lifecycle infrastructure remain under `src/core/orchestration/`. See [CONTRIBUTING.md](CONTRIBUTING.md) for development and contribution guidelines.
 
 ## License
 

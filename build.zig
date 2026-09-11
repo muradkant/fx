@@ -21,7 +21,7 @@ const NapiSurface = enum {
 };
 
 const OrchestrationMode = enum {
-    alt,
+    fixer,
     none,
     custom,
 };
@@ -56,11 +56,11 @@ pub fn build(b: *std.Build) void {
     const orchestration_mode: OrchestrationMode = b.option(
         OrchestrationMode,
         "orchestration",
-        "Bundled orchestration implementation: alt (default), none, or custom",
-    ) orelse if (orchestration_root_override != null) .custom else .alt;
+        "Bundled orchestration implementation: fixer (default), none, or custom",
+    ) orelse if (orchestration_root_override != null) .custom else .fixer;
     var orchestration_configuration_failure: ?*std.Build.Step = null;
     const orchestration_root: ?std.Build.LazyPath = switch (orchestration_mode) {
-        .alt => b.path("alt/extension.zig"),
+        .fixer => b.path("fixer/extension.zig"),
         .none => null,
         .custom => if (orchestration_root_override) |root|
             .{ .cwd_relative = root }
@@ -161,8 +161,8 @@ pub fn build(b: *std.Build) void {
                 "orchestration session binding round trips exact immutable identity",
                 "orchestration session binding rejects unknown fields",
                 "orchestration session binding persists beside the real session",
-                "resume menu labels ALT sessions with the pinned Team revision",
-                "session mode lookup distinguishes latest ALT and native conversations",
+                "resume menu labels Fixer sessions with the pinned Team revision",
+                "session mode lookup distinguishes latest Fixer and native conversations",
                 "definition manager requires a real Team and preserves edit intent",
                 "Team library never offers a primary-only preset",
                 "surface footer measures the orchestration definition manager inline",
@@ -180,9 +180,9 @@ pub fn build(b: *std.Build) void {
 
     const crucible_host_step = b.step(
         "crucible-host",
-        "Build ALT-enabled fx and exercise the extension through a real PTY",
+        "Build Fixer-enabled fx and exercise the extension through a real PTY",
     );
-    if (orchestration_mode == .alt) {
+    if (orchestration_mode == .fixer) {
         const bun_exe = b.option(
             []const u8,
             "bun",
@@ -202,7 +202,7 @@ pub fn build(b: *std.Build) void {
         crucible_host_step.dependOn(&run_host_scenario.step);
     } else {
         const failure = b.addFail(
-            "crucible-host exercises bundled ALT and requires -Dorchestration=alt",
+            "crucible-host exercises bundled Fixer and requires -Dorchestration=fixer",
         );
         crucible_host_step.dependOn(&failure.step);
     }

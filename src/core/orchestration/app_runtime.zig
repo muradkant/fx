@@ -81,7 +81,7 @@ pub fn handlePayload(
                 try app.writeDomainNotice(.{
                     .topic = descriptor.id,
                     .tone = .@"error",
-                    .body = "ALT mode was not enabled because fx could not prove that native subagent work is idle. Retry after native subagent recovery settles.",
+                    .body = "Fixer mode was not enabled because fx could not prove that native subagent work is idle. Retry after native subagent recovery settles.",
                 }, true);
                 return;
             };
@@ -90,7 +90,7 @@ pub fn handlePayload(
                 try app.writeDomainNotice(.{
                     .topic = descriptor.id,
                     .tone = .warning,
-                    .body = "ALT mode was not enabled because native fx subagent work is active. Settle or cancel that work first.",
+                    .body = "Fixer mode was not enabled because native fx subagent work is active. Settle or cancel that work first.",
                 }, true);
                 return;
             }
@@ -183,7 +183,7 @@ pub fn dispatchCanonicalTurn(
     var session_id_buffer: [64]u8 = undefined;
     const session_id = std.fmt.bufPrint(
         &session_id_buffer,
-        "alt-turn-{d}",
+        "fixer-turn-{d}",
         .{captured.source_turn_id},
     ) catch {
         releaseFailedCanonicalTurn(Extension, app, captured, error.SourceTurnIdExhausted);
@@ -222,7 +222,7 @@ pub fn dispatchCanonicalTurn(
     return true;
 }
 
-/// Adds another canonical user input to the active ALT session without
+/// Adds another canonical user input to the active Fixer session without
 /// replacing its root authority or creating a second orchestration session.
 pub fn dispatchCanonicalInstruction(
     comptime Host: type,
@@ -796,7 +796,7 @@ test "active native subagent work refuses orchestration before extension creatio
     try std.testing.expectEqual(@as(usize, 0), Extension.create_count);
     try std.testing.expectEqual(@as(usize, 1), app.notice_count);
     try std.testing.expectEqualStrings(
-        "ALT mode was not enabled because native fx subagent work is active. Settle or cancel that work first.",
+        "Fixer mode was not enabled because native fx subagent work is active. Settle or cancel that work first.",
         app.last_notice,
     );
     try std.testing.expect(!app.orchestration.active);
@@ -890,7 +890,7 @@ test "unsettled native subagent recovery fails orchestration admission closed" {
     try std.testing.expectEqual(@as(usize, 0), Extension.create_count);
     try std.testing.expectEqual(@as(usize, 1), app.notice_count);
     try std.testing.expectEqualStrings(
-        "ALT mode was not enabled because fx could not prove that native subagent work is idle. Retry after native subagent recovery settles.",
+        "Fixer mode was not enabled because fx could not prove that native subagent work is idle. Retry after native subagent recovery settles.",
         app.last_notice,
     );
     try std.testing.expect(!app.orchestration.active);

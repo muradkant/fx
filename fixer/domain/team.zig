@@ -84,7 +84,7 @@ pub const Team = struct {
         try self.validateReachableCollaboration();
     }
 
-    /// ALT is deliberately not a single-model mode. Peers form one complete
+    /// Fixer is deliberately not a single-model mode. Peers form one complete
     /// collaboration graph. Every specialist must be assigned to at least one
     /// context-bearing agent, and at least one collaborator must exist.
     fn validateReachableCollaboration(self: Team) ValidationError!void {
@@ -303,7 +303,7 @@ test "all Team peers are mutually consultable and specialist authority is direct
     try std.testing.expect(!value.canUseSpecialist("researcher", "vision-reader"));
 }
 
-test "Cline is a valid unified ALT Team provider" {
+test "Cline is a valid unified Fixer Team provider" {
     var value = fixture();
     value.provider_id = "cline";
     try value.validate();
@@ -326,7 +326,7 @@ test "Team identifiers are lowercase kebab-case" {
     try std.testing.expectError(error.InvalidIdentifier, value.validate());
 }
 
-test "ALT refuses a primary-only Team" {
+test "Fixer refuses a primary-only Team" {
     var value = fixture();
     value.primary.specialists = &.{};
     value.peers = &.{};

@@ -217,8 +217,8 @@ fn validateDigest(digest: [64]u8) !void {
 test "orchestration session binding round trips exact immutable identity" {
     const alloc = std.testing.allocator;
     const binding = Binding{
-        .extension_id = "alt",
-        .extension_name = "ALT",
+        .extension_id = "fixer",
+        .extension_name = "Fixer",
         .definition_kind = "team",
         .definition_id = "engineering",
         .definition_revision = 7,
@@ -229,8 +229,8 @@ test "orchestration session binding round trips exact immutable identity" {
     defer alloc.free(encoded);
     var decoded = try decode(alloc, encoded);
     defer decoded.deinit(alloc);
-    try std.testing.expectEqualStrings("alt", decoded.extension_id);
-    try std.testing.expectEqualStrings("ALT", decoded.extension_name);
+    try std.testing.expectEqualStrings("fixer", decoded.extension_id);
+    try std.testing.expectEqualStrings("Fixer", decoded.extension_name);
     try std.testing.expectEqualStrings("team", decoded.definition_kind);
     try std.testing.expectEqualStrings("engineering", decoded.definition_id);
     try std.testing.expectEqual(@as(u32, 7), decoded.definition_revision);
@@ -243,7 +243,7 @@ test "orchestration session binding rejects unknown fields" {
         error.InvalidBinding,
         decode(
             std.testing.allocator,
-            "{\"schema\":1,\"extension_id\":\"alt\",\"extension_name\":\"ALT\",\"definition_kind\":\"team\",\"definition_id\":\"one\",\"definition_revision\":1,\"definition_digest\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"display_name\":\"One\",\"surprise\":true}",
+            "{\"schema\":1,\"extension_id\":\"alt\",\"extension_name\":\"Fixer\",\"definition_kind\":\"team\",\"definition_id\":\"one\",\"definition_revision\":1,\"definition_digest\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"display_name\":\"One\",\"surprise\":true}",
         ),
     );
 }
@@ -259,8 +259,8 @@ test "orchestration session binding persists beside the real session" {
     ) };
     defer session_dir.close();
     const binding = Binding{
-        .extension_id = "alt",
-        .extension_name = "ALT",
+        .extension_id = "fixer",
+        .extension_name = "Fixer",
         .definition_kind = "team",
         .definition_id = "engineering",
         .definition_revision = 3,

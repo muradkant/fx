@@ -2122,9 +2122,9 @@ const App = struct {
         const model_copy = try std.heap.c_allocator.dupe(u8, self.provider_selection.selection().model);
         errdefer std.heap.c_allocator.free(model_copy);
 
-        // An ALT canonical turn is provider-neutral custody. Its Team selects
+        // A Fixer canonical turn is provider-neutral custody. Its Team selects
         // and resolves a credential only when each fx-owned run is admitted.
-        // Requiring the root composer provider here would make ALT depend on a
+        // Requiring the root composer provider here would make Fixer depend on a
         // provider that the Team may never use.
         const gateway_credential: ?auth_runtime.GatewayCredential = if (orchestration_turn)
             null
@@ -4897,7 +4897,7 @@ test "compiled orchestration contributes to the native slash-command surface" {
         try std.testing.expect(std.mem.find(u8, help, descriptor.usage) != null);
         try std.testing.expect(command_specs.slashCompletionCount(app_slash_registry, "/al") > 0);
     } else {
-        try std.testing.expect(app_slash_registry.lookup("/alt") == null);
+        try std.testing.expect(app_slash_registry.lookup("/fixer") == null);
     }
 }
 

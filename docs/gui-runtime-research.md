@@ -4,7 +4,7 @@ Status: research checkpoint, 2026-08-28. No GUI implementation decision has been
 
 ## Objective
 
-The prospective GUI is a thin interactive front end to fx, not a second harness. It must preserve fx's ownership of sessions, models, tools, permissions, processes, persistence, and ALT orchestration.
+The prospective GUI is a thin interactive front end to fx, not a second harness. It must preserve fx's ownership of sessions, models, tools, permissions, processes, persistence, and Fixer orchestration.
 
 The acceptance bar is intentionally severe:
 

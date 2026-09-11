@@ -747,7 +747,7 @@ pub fn Runtime(comptime App: type) type {
 
             // Native worker questions are opened by their ordered
             // `question_requested` event below, after paced assistant text has
-            // drained. ALT runs are isolated from that worker event queue, so
+            // drained. Fixer runs are isolated from that worker event queue, so
             // only their question needs polling here. Once a prompt is open,
             // either source may keep it alive through its own snapshot.
             if (app.question_prompt.isActive()) {

@@ -17,13 +17,13 @@ import { TmuxSession, tmuxAvailable } from "./tmux-helpers";
 const ENABLED = process.env.FX_ORCHESTRATION_E2E === "1";
 const SKIP = !ENABLED || !tmuxAvailable();
 const TIMEOUT = 30_000;
-const STEERING_MARKER = "CRUCIBLE_ALT_STEERING_DONE_D4C7";
-const STEERING_FOLLOWUP_MARKER = "CRUCIBLE_ALT_STEERING_MEMORY_8A21";
-const CORRECTION_MARKER = "CRUCIBLE_ALT_CORRECTION_DONE_31B9";
-const CONTINUITY_MARKER = "CRUCIBLE_ALT_CONTEXT_SURFACE_DONE_5E72";
+const STEERING_MARKER = "CRUCIBLE_FIXER_STEERING_DONE_D4C7";
+const STEERING_FOLLOWUP_MARKER = "CRUCIBLE_FIXER_STEERING_MEMORY_8A21";
+const CORRECTION_MARKER = "CRUCIBLE_FIXER_CORRECTION_DONE_31B9";
+const CONTINUITY_MARKER = "CRUCIBLE_FIXER_CONTEXT_SURFACE_DONE_5E72";
 const CONTINUITY_FILE_SENTINEL = "EXACT_PRE_CONSULTATION_TOOL_EVIDENCE_C82D";
 const CONTINUITY_PEER_SENTINEL = "PEER_REVIEW_EVIDENCE_4F19";
-const TEAM_FAILURE_MARKER = "CRUCIBLE_ALT_TEAM_FAILURE_RECOVERED_9C44";
+const TEAM_FAILURE_MARKER = "CRUCIBLE_FIXER_TEAM_FAILURE_RECOVERED_9C44";
 const NESTED_SPECIALIST_RAW = "CRUCIBLE_NESTED_SPECIALIST_RAW_73E1";
 const NESTED_PEER_SYNTHESIS = "CRUCIBLE_NESTED_PEER_SYNTHESIS_A902";
 const NESTED_ANSWER_MARKER = "CRUCIBLE_NESTED_UNWIND_DONE_6F3B";
@@ -63,10 +63,10 @@ const ENGINEERING_TEAM = {
   }],
 };
 
-function seedAltEngineeringTeam(home: string) {
+function seedFixerEngineeringTeam(home: string) {
   const source = `${JSON.stringify(ENGINEERING_TEAM, null, 2)}\n`;
   const digest = createHash("sha256").update(source).digest("hex");
-  const identity = join(home, ".fx", "extensions", "alt", "teams", "engineering");
+  const identity = join(home, ".fx", "extensions", "fixer", "teams", "engineering");
   mkdirSync(identity, { recursive: true, mode: 0o700 });
   writeFileSync(join(identity, `1-${digest}.json`), source, { mode: 0o600 });
   writeFileSync(join(identity, "manifest.json"), JSON.stringify({
@@ -81,14 +81,14 @@ function seedAltEngineeringTeam(home: string) {
   }), { mode: 0o600 });
 }
 
-async function enterSeededAlt(active: TmuxSession) {
-  await active.sendText("/alt");
-  await active.waitForText("ALT Teams 1", 5_000);
+async function enterSeededFixer(active: TmuxSession) {
+  await active.sendText("/fixer");
+  await active.waitForText("Fixer Teams 1", 5_000);
   await active.sendKeys("Down");
   await active.sendKeys("Enter");
   await active.waitForText("Start a new conversation", 5_000);
   await active.sendKeys("Enter");
-  await active.waitForText("ALT mode enabled.", 5_000);
+  await active.waitForText("Fixer mode enabled.", 5_000);
   await active.waitForComposer(5_000);
 }
 
@@ -166,7 +166,7 @@ function startHeldOpenCodeSteeringServer() {
       });
       return new Response(
         `data: ${JSON.stringify({
-          id: "alt-steering",
+          id: "fixer-steering",
           choices: [{ delta: { content: terminal }, finish_reason: null }],
         })}\n\n` +
           `data: ${JSON.stringify({
@@ -223,7 +223,7 @@ function startOpenCodeTeamUxServer() {
       });
       return new Response(
         `data: ${JSON.stringify({
-          id: "alt-team-ux",
+          id: "fixer-team-ux",
           choices: [{ delta: { content: terminal }, finish_reason: null }],
         })}\n\n` +
           `data: ${JSON.stringify({
@@ -264,7 +264,7 @@ function startOpenCodeCorrectionServer() {
         : JSON.stringify({ kind: "answer", answer: CORRECTION_MARKER });
       return new Response(
         `data: ${JSON.stringify({
-          id: "alt-correction",
+          id: "fixer-correction",
           choices: [{ delta: { content: terminal }, finish_reason: null }],
         })}\n\n` +
           `data: ${JSON.stringify({
@@ -303,7 +303,7 @@ function startOpenCodeContinuityServer() {
         });
         return new Response(
           `data: ${JSON.stringify({
-            id: "alt-continuity-tool",
+            id: "fixer-continuity-tool",
             choices: [{
               delta: {
                 tool_calls: [{
@@ -340,7 +340,7 @@ function startOpenCodeContinuityServer() {
           : JSON.stringify({ kind: "answer", answer: CONTINUITY_MARKER });
       return new Response(
         `data: ${JSON.stringify({
-          id: `alt-continuity-${ordinal}`,
+          id: `fixer-continuity-${ordinal}`,
           choices: [{ delta: { content: terminal }, finish_reason: null }],
         })}\n\n` +
           `data: ${JSON.stringify({
@@ -385,7 +385,7 @@ function startOpenCodeTeamFailureServer() {
           : JSON.stringify({ kind: "answer", answer: TEAM_FAILURE_MARKER });
       return new Response(
         `data: ${JSON.stringify({
-          id: `alt-team-failure-${ordinal}`,
+          id: `fixer-team-failure-${ordinal}`,
           choices: [{ delta: { content: terminal }, finish_reason: null }],
         })}\n\n` +
           `data: ${JSON.stringify({
@@ -424,7 +424,7 @@ function startOpenCodeNestedTeamServer() {
         });
         return new Response(
           `data: ${JSON.stringify({
-            id: "alt-nested-specialist-tool",
+            id: "fixer-nested-specialist-tool",
             choices: [{
               delta: {
                 tool_calls: [{
@@ -477,7 +477,7 @@ function startOpenCodeNestedTeamServer() {
               : JSON.stringify({ kind: "answer", answer: NESTED_ANSWER_MARKER });
       return new Response(
         `data: ${JSON.stringify({
-          id: `alt-nested-team-${ordinal}`,
+          id: `fixer-nested-team-${ordinal}`,
           choices: [{ delta: { content: terminal }, finish_reason: null }],
         })}\n\n` +
           `data: ${JSON.stringify({
@@ -557,8 +557,8 @@ describe.skipIf(SKIP)("tui: orchestration extension host", () => {
           await active.waitForText(`Model  ${id}`, 5_000);
         };
         await active.waitForComposer(10_000);
-        await active.sendText("/alt");
-        await active.waitForText("ALT Teams 0", 5_000);
+        await active.sendText("/fixer");
+        await active.waitForText("Fixer Teams 0", 5_000);
         await active.sendKeys("Enter");
         await choose("Primary");
         await model("deepseek-v4-flash");
@@ -595,8 +595,8 @@ describe.skipIf(SKIP)("tui: orchestration extension host", () => {
         }
         await back("Name");
         await choose("Save & start");
-        await active.waitForText("ALT mode enabled.", 5_000);
-        const teamsRoot = join(home, ".fx", "extensions", "alt", "teams");
+        await active.waitForText("Fixer mode enabled.", 5_000);
+        const teamsRoot = join(home, ".fx", "extensions", "fixer", "teams");
         const teamIds = readdirSync(teamsRoot, { withFileTypes: true })
           .filter((entry) => entry.isDirectory())
           .map((entry) => entry.name);
@@ -639,7 +639,7 @@ describe.skipIf(SKIP)("tui: orchestration extension host", () => {
   }
 
   test(
-    "native Team UX creates revises deletes and resumes immutable ALT sessions",
+    "native Team UX creates revises deletes and resumes immutable Fixer sessions",
     async () => {
       const root = mkdtempSync(join(tmpdir(), "fx-orchestration-team-ux-"));
       const home = join(root, "home");
@@ -676,8 +676,8 @@ describe.skipIf(SKIP)("tui: orchestration extension host", () => {
         });
         await session.waitForComposer(10_000);
 
-        await session.sendText("/alt");
-        await session.waitForText("ALT Teams 0", 5_000);
+        await session.sendText("/fixer");
+        await session.waitForText("Fixer Teams 0", 5_000);
         await session.sendKeys("Enter");
         await session.waitForText(
           "Configure a primary plus at least one peer or specialist.",
@@ -727,7 +727,7 @@ describe.skipIf(SKIP)("tui: orchestration extension host", () => {
           await session.waitForPane((pane) => pane.includes(`› ${label}`), 5_000);
         }
         await session.sendKeys("Enter");
-        await session.waitForText("ALT mode enabled.", 5_000);
+        await session.waitForText("Fixer mode enabled.", 5_000);
         await session.waitForComposer(5_000);
         await session.sendText("Persist a conversation on Team revision one.");
         await session.waitForText(TEAM_UX_FIRST_MARKER, 10_000);
@@ -737,7 +737,7 @@ describe.skipIf(SKIP)("tui: orchestration extension host", () => {
           home,
           ".fx",
           "extensions",
-          "alt",
+          "fixer",
           "teams",
         );
         const teamIds = readdirSync(teamsRoot, { withFileTypes: true })
@@ -762,7 +762,7 @@ describe.skipIf(SKIP)("tui: orchestration extension host", () => {
           home,
           ".fx",
           "extensions",
-          "alt",
+          "fixer",
           "teams",
           teamId,
           `1-${initialManifest.latest_digest}.json`,
@@ -773,11 +773,11 @@ describe.skipIf(SKIP)("tui: orchestration extension host", () => {
         expect(initialTeam.peers[0].id).toMatch(/^role-[0-9a-f]{24}$/);
         expect(initialTeam.primary.id).not.toBe(initialTeam.peers[0].id);
 
-        await session.sendText("/alt off");
-        await session.waitForText("ALT mode disabled.", 5_000);
+        await session.sendText("/fixer off");
+        await session.waitForText("Fixer mode disabled.", 5_000);
         await session.waitForComposer(5_000);
-        await session.sendText("/alt teams");
-        await session.waitForText("ALT Teams 1", 5_000);
+        await session.sendText("/fixer teams");
+        await session.waitForText("Fixer Teams 1", 5_000);
         await session.sendKeys("Down");
         await session.sendKeys("Enter");
         await session.waitForText("Edit as a new revision", 5_000);
@@ -797,7 +797,7 @@ describe.skipIf(SKIP)("tui: orchestration extension host", () => {
           await session.waitForPane((pane) => pane.includes(`› ${label}`), 5_000);
         }
         await session.sendKeys("Enter");
-        await session.waitForText("ALT mode enabled.", 5_000);
+        await session.waitForText("Fixer mode enabled.", 5_000);
         await session.waitForComposer(5_000);
         await session.sendText("Persist a conversation on Team revision two.");
         await session.waitForText(TEAM_UX_SECOND_MARKER, 10_000);
@@ -814,24 +814,24 @@ describe.skipIf(SKIP)("tui: orchestration extension host", () => {
           home,
           ".fx",
           "extensions",
-          "alt",
+          "fixer",
           "teams",
           teamId,
           `2-${revisedManifest.latest_digest}.json`,
         ))).toBe(true);
 
-        await session.sendText("/alt off");
-        await session.waitForText("ALT mode disabled.", 5_000);
+        await session.sendText("/fixer off");
+        await session.waitForText("Fixer mode disabled.", 5_000);
         await session.waitForComposer(5_000);
         await session.sendText("/resume");
-        await session.waitForText("ALT · Revised Team r2", 5_000);
-        await session.waitForText("ALT · My Team r1", 5_000);
+        await session.waitForText("Fixer · Revised Team r2", 5_000);
+        await session.waitForText("Fixer · My Team r1", 5_000);
         await session.sendKeys("Escape");
         await session.waitForPane((pane) => !pane.includes("Sessions 2"), 5_000);
         await session.waitForComposer(5_000);
 
-        await session.sendText("/alt teams");
-        await session.waitForText("ALT Teams 1", 5_000);
+        await session.sendText("/fixer teams");
+        await session.waitForText("Fixer Teams 1", 5_000);
         await session.sendKeys("Down");
         await session.sendKeys("Enter");
         await session.sendKeys("Down");
@@ -840,17 +840,17 @@ describe.skipIf(SKIP)("tui: orchestration extension host", () => {
         await session.waitForText("Delete Team?", 5_000);
         await session.sendKeys("Up");
         await session.sendKeys("Enter");
-        await session.waitForText("ALT Teams 0", 5_000);
+        await session.waitForText("Fixer Teams 0", 5_000);
         expect(JSON.parse(readFileSync(manifestPath, "utf8"))).toMatchObject({
           latest_revision: 2,
           deleted: true,
         });
 
         await session.sendKeys("Escape");
-        await session.waitForPane((pane) => !pane.includes("ALT Teams 0"), 5_000);
+        await session.waitForPane((pane) => !pane.includes("Fixer Teams 0"), 5_000);
         await session.waitForComposer(5_000);
-        await session.sendText("/alt");
-        await session.waitForText("ALT mode enabled.", 5_000);
+        await session.sendText("/fixer");
+        await session.waitForText("Fixer mode enabled.", 5_000);
         await session.waitForComposer(5_000);
         expect(session.paneStatus()).toEqual({ dead: false, status: null });
         expect(readFileSync(stderrPath, "utf8")).toBe("");
@@ -894,7 +894,7 @@ describe.skipIf(SKIP)("tui: orchestration extension host", () => {
       const tracePath = join(root, "causal.trace.log");
       mkdirSync(home);
       mkdirSync(workspace);
-      seedAltEngineeringTeam(home);
+      seedFixerEngineeringTeam(home);
       tempDirs.push(root);
 
       session = await TmuxSession.create({
@@ -920,21 +920,21 @@ describe.skipIf(SKIP)("tui: orchestration extension host", () => {
         await session.sendLiteral("/al");
         await session.waitForPane(
           (pane) =>
-            pane.includes("/alt") &&
-            pane.includes("resume ALT or manage Teams"),
+            pane.includes("/fixer") &&
+            pane.includes("resume Fixer or manage Teams"),
           5_000,
         );
         await session.sendKeys("C-u");
         await session.waitForComposer(5_000);
-        await enterSeededAlt(session);
+        await enterSeededFixer(session);
         await session.waitForComposer(5_000);
         expect(session.paneStatus()).toEqual({ dead: false, status: null });
 
         for (const [command, expected] of [
-          ["/alt", "ALT mode is already enabled."],
-          ["/alt off", "ALT mode disabled."],
-          ["/alt off", "ALT mode is already disabled."],
-          ["/alt nonsense", "/alt [off|teams|new]"],
+          ["/fixer", "Fixer mode is already enabled."],
+          ["/fixer off", "Fixer mode disabled."],
+          ["/fixer off", "Fixer mode is already disabled."],
+          ["/fixer nonsense", "/fixer [off|teams|new]"],
         ] as const) {
           await session.sendText(command);
           await session.waitForText(expected, 5_000);
@@ -991,7 +991,7 @@ describe.skipIf(SKIP)("tui: orchestration extension host", () => {
   );
 
   test(
-    "ordinary ALT input steers the held run through the native queue",
+    "ordinary Fixer input steers the held run through the native queue",
     async () => {
       const root = mkdtempSync(join(tmpdir(), "fx-orchestration-queue-"));
       const home = join(root, "home");
@@ -1001,7 +1001,7 @@ describe.skipIf(SKIP)("tui: orchestration extension host", () => {
       const tracePath = join(root, "causal.trace.log");
       mkdirSync(fxHome, { recursive: true, mode: 0o700 });
       mkdirSync(workspace);
-      seedAltEngineeringTeam(home);
+      seedFixerEngineeringTeam(home);
       writeFileSync(
         join(fxHome, "opencode-auth.json"),
         `${JSON.stringify({ schema_version: 1, api_key: "opencode-queue-fixture" })}\n`,
@@ -1010,7 +1010,7 @@ describe.skipIf(SKIP)("tui: orchestration extension host", () => {
       tempDirs.push(root);
       const provider = startHeldOpenCodeSteeringServer();
       const replacement =
-        "REPLACEMENT ALT INSTRUCTION MUST STEER THE HELD RUN";
+        "REPLACEMENT FIXER INSTRUCTION MUST STEER THE HELD RUN";
 
       try {
         session = await TmuxSession.create({
@@ -1028,14 +1028,14 @@ describe.skipIf(SKIP)("tui: orchestration extension host", () => {
           },
         });
         await session.waitForComposer(10_000);
-        await enterSeededAlt(session);
-        await session.sendText("FIRST ALT TURN HELD BY THE PROVIDER");
+        await enterSeededFixer(session);
+        await session.sendText("FIRST FIXER TURN HELD BY THE PROVIDER");
         await waitForFileText(tracePath, "event=agent_run_started", 10_000);
         expect(provider.requestBodies).toHaveLength(1);
 
         // Plain Enter is steering during an active turn, so the held run is
         // interrupted and the replacement instruction is committed to the same
-        // ALT session instead of starting a second concurrent turn.
+        // Fixer session instead of starting a second concurrent turn.
         await session.sendText(replacement);
         const steeringTrace = await waitForFileText(
           tracePath,
@@ -1062,7 +1062,7 @@ describe.skipIf(SKIP)("tui: orchestration extension host", () => {
   );
 
   test(
-    "an active ALT turn accepts a canonical instruction and replaces its held run",
+    "an active Fixer turn accepts a canonical instruction and replaces its held run",
     async () => {
       const root = mkdtempSync(join(tmpdir(), "fx-orchestration-steering-"));
       const home = join(root, "home");
@@ -1072,7 +1072,7 @@ describe.skipIf(SKIP)("tui: orchestration extension host", () => {
       const tracePath = join(root, "causal.trace.log");
       mkdirSync(fxHome, { recursive: true, mode: 0o700 });
       mkdirSync(workspace);
-      seedAltEngineeringTeam(home);
+      seedFixerEngineeringTeam(home);
       const authPath = join(fxHome, "opencode-auth.json");
       writeFileSync(
         authPath,
@@ -1102,8 +1102,8 @@ describe.skipIf(SKIP)("tui: orchestration extension host", () => {
           },
         });
         await session.waitForComposer(10_000);
-        await enterSeededAlt(session);
-        await session.sendText("ROOT ALT REQUEST THAT MUST REMAIN CANONICAL");
+        await enterSeededFixer(session);
+        await session.sendText("ROOT FIXER REQUEST THAT MUST REMAIN CANONICAL");
         await waitForFileText(tracePath, "event=agent_run_started", 10_000);
 
         await sendSteering(session,
@@ -1119,7 +1119,7 @@ describe.skipIf(SKIP)("tui: orchestration extension host", () => {
 
         expect(provider.requestBodies.length).toBeGreaterThanOrEqual(2);
         const replacementRequest = provider.requestBodies[1];
-        expect(replacementRequest).toContain("ROOT ALT REQUEST THAT MUST REMAIN CANONICAL");
+        expect(replacementRequest).toContain("ROOT FIXER REQUEST THAT MUST REMAIN CANONICAL");
         expect(replacementRequest).toContain("IN-SESSION STEERING");
         const lifecycle = [
           "event=agent_run_interrupted",
@@ -1139,7 +1139,7 @@ describe.skipIf(SKIP)("tui: orchestration extension host", () => {
         expect(readFileSync(stderrPath, "utf8")).toBe("");
 
         await session.sendText(
-          "Start the next ALT turn and use the durable conversation view.",
+          "Start the next Fixer turn and use the durable conversation view.",
         );
         const followupTrace = await waitForFileOccurrences(
           tracePath,
@@ -1151,7 +1151,7 @@ describe.skipIf(SKIP)("tui: orchestration extension host", () => {
         await session.waitForComposer(10_000);
         expect(provider.requestBodies.length).toBeGreaterThanOrEqual(3);
         const followupRequest = provider.requestBodies[2];
-        expect(followupRequest).toContain("ROOT ALT REQUEST THAT MUST REMAIN CANONICAL");
+        expect(followupRequest).toContain("ROOT FIXER REQUEST THAT MUST REMAIN CANONICAL");
         expect(followupRequest).toContain("IN-SESSION STEERING");
         expect(followupRequest).toContain(STEERING_MARKER);
         expect(followupTrace.match(/event=session_created/g)?.length).toBe(2);
@@ -1203,7 +1203,7 @@ describe.skipIf(SKIP)("tui: orchestration extension host", () => {
       const tracePath = join(root, "causal.trace.log");
       mkdirSync(fxHome, { recursive: true, mode: 0o700 });
       mkdirSync(workspace);
-      seedAltEngineeringTeam(home);
+      seedFixerEngineeringTeam(home);
       const authPath = join(fxHome, "opencode-auth.json");
       writeFileSync(
         authPath,
@@ -1230,7 +1230,7 @@ describe.skipIf(SKIP)("tui: orchestration extension host", () => {
           },
         });
         await session.waitForComposer(10_000);
-        await enterSeededAlt(session);
+        await enterSeededFixer(session);
         await session.sendText("Exercise semantic protocol correction.");
         const trace = await waitForFileText(tracePath, "event=answer_published", 15_000);
         await session.waitForText(CORRECTION_MARKER, 10_000);
@@ -1293,7 +1293,7 @@ describe.skipIf(SKIP)("tui: orchestration extension host", () => {
       const tracePath = join(root, "causal.trace.log");
       mkdirSync(fxHome, { recursive: true, mode: 0o700 });
       mkdirSync(workspace);
-      seedAltEngineeringTeam(home);
+      seedFixerEngineeringTeam(home);
       writeFileSync(join(workspace, "continuity-sentinel.txt"), `${CONTINUITY_FILE_SENTINEL}\n`);
       const authPath = join(fxHome, "opencode-auth.json");
       writeFileSync(
@@ -1322,7 +1322,7 @@ describe.skipIf(SKIP)("tui: orchestration extension host", () => {
           },
         });
         await session.waitForComposer(10_000);
-        await enterSeededAlt(session);
+        await enterSeededFixer(session);
         await session.sendText(exactRoot);
         await waitForFileText(tracePath, "event=answer_published", 20_000);
         await session.waitForText(CONTINUITY_MARKER, 10_000);
@@ -1384,7 +1384,7 @@ describe.skipIf(SKIP)("tui: orchestration extension host", () => {
       const tracePath = join(root, "causal.trace.log");
       mkdirSync(fxHome, { recursive: true, mode: 0o700 });
       mkdirSync(workspace);
-      seedAltEngineeringTeam(home);
+      seedFixerEngineeringTeam(home);
       const authPath = join(fxHome, "opencode-auth.json");
       writeFileSync(
         authPath,
@@ -1411,7 +1411,7 @@ describe.skipIf(SKIP)("tui: orchestration extension host", () => {
           },
         });
         await session.waitForComposer(10_000);
-        await enterSeededAlt(session);
+        await enterSeededFixer(session);
         await session.sendText("Exercise Team failure recovery.");
         const trace = await waitForFileText(tracePath, "event=answer_published", 15_000);
         await session.waitForText(TEAM_FAILURE_MARKER, 10_000);
@@ -1474,7 +1474,7 @@ describe.skipIf(SKIP)("tui: orchestration extension host", () => {
       const tracePath = join(root, "causal.trace.log");
       mkdirSync(fxHome, { recursive: true, mode: 0o700 });
       mkdirSync(workspace);
-      seedAltEngineeringTeam(home);
+      seedFixerEngineeringTeam(home);
       writeFileSync(
         join(workspace, "nested-specialist-sentinel.txt"),
         `${NESTED_SPECIALIST_RAW}\n`,
@@ -1506,7 +1506,7 @@ describe.skipIf(SKIP)("tui: orchestration extension host", () => {
           },
         });
         await session.waitForComposer(10_000);
-        await enterSeededAlt(session);
+        await enterSeededFixer(session);
         await session.sendText(exactRoot);
         const trace = await waitForFileText(tracePath, "event=answer_published", 20_000);
         await session.waitForText(NESTED_ANSWER_MARKER, 10_000);

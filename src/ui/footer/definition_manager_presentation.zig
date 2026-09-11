@@ -237,7 +237,7 @@ test "Team library never offers a primary-only preset" {
         .active = true,
         .state = &manager,
         .definition_kind = "Team",
-        .extension_name = "ALT",
+        .extension_name = "Fixer",
     };
     var row = try composeRow(alloc, projection, 2, 80, 8);
     defer row.deinit(alloc);

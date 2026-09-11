@@ -332,7 +332,7 @@ pub const Editor = struct {
         self.addCountRow("Peers", self.roleArray(.peer).items.len);
         self.addCountRow("Specialists", self.roleArray(.specialist).items.len);
         self.addRow("Specialist access", "assign specialists to primary and peers", false, false);
-        self.addRow("Save & start", "new ALT conversation", false, false);
+        self.addRow("Save & start", "new Fixer conversation", false, false);
     }
 
     fn projectProvider(self: *Editor) void {
@@ -400,7 +400,7 @@ pub const Editor = struct {
     fn subtitle(self: *Editor) []const u8 {
         return switch (self.screen) {
             .overview => "Configure a primary plus at least one peer or specialist.",
-            .provider => "ALT accepts only unified multi-model providers.",
+            .provider => "Fixer accepts only unified multi-model providers.",
             .members => "Every role must use a distinct catalog model.",
             .role => "Model and instructions are pinned in this Team revision.",
             .specialist_access => "Every peer can consult every other peer; specialist access is assigned here.",
@@ -812,7 +812,7 @@ fn providerLabel(provider: []const u8) []const u8 {
 
 fn teamValidationMessage(err: anyerror) []const u8 {
     return switch (err) {
-        error.MissingCollaborator => "Add at least one peer or specialist before starting ALT.",
+        error.MissingCollaborator => "Add at least one peer or specialist before starting Fixer.",
         error.UnreachableSpecialist => "Give at least one primary or peer access to every specialist.",
         error.DuplicateCatalogModel, error.DuplicateModelOwner => "Every Team role must use a distinct model.",
         error.EmptyModel => "Choose a model for every Team role.",

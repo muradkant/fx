@@ -112,7 +112,7 @@ pub const Store = struct {
     }
 
     /// Materializes exactly the canonical current user turn. Conversation
-    /// history is intentionally absent: ALT owns its session projection.
+    /// history is intentionally absent: Fixer owns its session projection.
     pub fn cloneCanonical(
         self: *const Store,
         alloc: std.mem.Allocator,
@@ -200,7 +200,7 @@ pub const Store = struct {
         return result;
     }
 
-    /// Builds the one durable fx user record for an ALT session. Instructions
+    /// Builds the one durable fx user record for a Fixer session. Instructions
     /// remain separate canonical custody entries while the turn is active, but
     /// persistence records their ordered semantic combination after terminal
     /// completion, failure, or cancellation.

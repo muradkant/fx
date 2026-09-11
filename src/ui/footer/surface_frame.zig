@@ -1798,7 +1798,7 @@ test "surface footer measures the orchestration definition manager inline" {
         .active = true,
         .state = &manager,
         .definition_kind = "Team",
-        .extension_name = "ALT",
+        .extension_name = "Fixer",
     };
 
     {

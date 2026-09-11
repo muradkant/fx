@@ -5,7 +5,7 @@ const WireAgent = struct {
     id: []const u8,
     model_id: []const u8,
     definition: []const u8,
-    // Accepted only so sessions pinned to early ALT revisions remain readable.
+    // Accepted only so sessions pinned to early Fixer revisions remain readable.
     // Peer access is now inherent and this value never enters the domain Team.
     peers: []const []const u8 = &.{},
     specialists: []const []const u8 = &.{},

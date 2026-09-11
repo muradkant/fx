@@ -27,7 +27,7 @@ fn generateDefinitionEditorIdentitySeed() [32]u8 {
 
 /// Owns the interactive definition-library and session-binding workflow. The
 /// composition root exposes narrow callbacks while this runtime keeps Team
-/// management out of `main.zig` and independent of ALT's document schema.
+/// management out of `main.zig` and independent of Fixer's document schema.
 pub fn Runtime(
     comptime Host: type,
     comptime Extension: type,
@@ -62,7 +62,7 @@ pub fn Runtime(
             try app.writeDomainNotice(.{
                 .topic = Extension.descriptor().id,
                 .tone = .@"error",
-                .body = "/alt [off|teams|new]",
+                .body = "/fixer [off|teams|new]",
             }, true);
         }
 
@@ -466,7 +466,7 @@ pub fn Runtime(
                 try app.writeDomainNotice(.{
                     .topic = descriptor.id,
                     .tone = .neutral,
-                    .body = "ALT mode is already disabled.",
+                    .body = "Fixer mode is already disabled.",
                 }, true);
                 return;
             }
@@ -481,7 +481,7 @@ pub fn Runtime(
                 try app.writeDomainNotice(.{
                     .topic = descriptor.id,
                     .tone = .neutral,
-                    .body = "ALT mode disabled.",
+                    .body = "Fixer mode disabled.",
                 }, true);
                 return;
             }
