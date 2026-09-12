@@ -193,6 +193,12 @@ fn runtimeDeps(context: *Context) agent_runtime.AgentRuntimeDeps {
         .tool_registry = tool_ctx.tool_registry,
         .context_registry = tool_ctx.context_registry,
         .context_enabled = tool_ctx.context_enabled,
+        // Isolated runs never present assistant markdown to a user: every run
+        // ends in a machine envelope (or specialist result) parsed by the
+        // Fixer extension, with human text published via publish_answer.
+        // Stay source-only like ACP so wire JSON never renders live;
+        // operational and restart notices still stream.
+        .render_assistant_text = false,
         .finalize_turn = finalizeTurn,
         .append_runtime_context = appendRuntimeContext,
         .append_static_context = appendStaticContext,
