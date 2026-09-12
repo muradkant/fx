@@ -1,6 +1,10 @@
 const std = @import("std");
 const io_mod = @import("../shared/io.zig");
 const paste_blocks = @import("../input/pasted_blocks.zig");
+const provider_catalog = @import("../auth/provider_catalog.zig");
+const credentials = @import("../auth/credentials.zig");
+const model_catalog = @import("../gateway/model_catalog.zig");
+const provider_runtime = @import("../app/provider_runtime.zig");
 const app_session_runtime = @import("../app/app_session_runtime.zig");
 const orchestration_app_runtime = @import("app_runtime.zig");
 const revision_store = @import("revision_store.zig");
@@ -62,7 +66,7 @@ pub fn Runtime(
             try app.writeDomainNotice(.{
                 .topic = Extension.descriptor().id,
                 .tone = .@"error",
-                .body = "/fixer [off|teams|new]",
+                .body = Extension.descriptor().usage,
             }, true);
         }
 
@@ -374,11 +378,7 @@ pub fn Runtime(
                     text,
                 ),
                 .choose_model => |provider_id| {
-                    if (comptime @hasDecl(App, "openOrchestrationDefinitionModelPicker")) {
-                        _ = try app.openOrchestrationDefinitionModelPicker(provider_id);
-                    } else {
-                        return error.OrchestrationModelPickerUnavailable;
-                    }
+                    _ = try openDefinitionModelPicker(app, provider_id);
                 },
                 .exit => {
                     editor.deinit();
@@ -407,6 +407,71 @@ pub fn Runtime(
                     app.input_runtime.inputResetState().clearCurrent(app.alloc);
                 },
             }
+        }
+
+        fn openDefinitionModelPicker(app: *App, provider_id: []const u8) !bool {
+            const provider = provider_catalog.parse(provider_id) orelse
+                return error.UnknownOrchestrationProvider;
+            if (provider_catalog.find(provider).catalog_scope != .unified) {
+                return error.OrchestrationProviderNotUnified;
+            }
+            if (provider_runtime.provider(app) == provider) {
+                app.ensureModelCache();
+            } else {
+                try app.flushBeforeBlockingExternalWork();
+                const resolution = credentials.resolveForProvider(
+                    app.alloc,
+                    app.auth.oauthTransport(),
+                    app.auth.secretStore(),
+                    .refresh_if_needed,
+                    provider,
+                    null,
+                ) catch {
+                    try app.writeDomainNotice(.{
+                        .topic = "model",
+                        .tone = .@"error",
+                        .body = "Could not load credentials for that Team provider.",
+                    }, true);
+                    return false;
+                };
+                var credential = resolution.credential orelse {
+                    app.auth.openPickerForProvider(app.alloc, provider);
+                    app.shell.render_requests.request(.footer);
+                    return false;
+                };
+                defer credential.deinit(app.alloc);
+                const access = credentials.catalogAccessForCredentialAndAccount(
+                    credential.source,
+                    credential.token,
+                    credential.gatewayTeam(),
+                    credential.accountId(),
+                );
+                const fetched = app.fetchProviderCatalog(provider, access) catch {
+                    try app.writeDomainNotice(.{
+                        .topic = "model",
+                        .tone = .@"error",
+                        .body = "Could not load that Team provider's model catalog.",
+                    }, true);
+                    return false;
+                };
+                var catalog = switch (fetched) {
+                    .catalog => |value| value,
+                    .failure => {
+                        try app.writeDomainNotice(.{
+                            .topic = "model",
+                            .tone = .@"error",
+                            .body = "That Team provider's model catalog could not be validated.",
+                        }, true);
+                        return false;
+                    },
+                };
+                defer model_catalog.freeModelCatalog(app.alloc, &catalog);
+                app.model_cache.adoptOwnedCatalog(access, &catalog);
+            }
+            try app.model_cache.openMenu();
+            app.input_runtime.inputResetState().clearCurrent(app.alloc);
+            app.shell.render_requests.request(.footer);
+            return true;
         }
 
         fn deleteSelectedDefinition(app: *App) !void {

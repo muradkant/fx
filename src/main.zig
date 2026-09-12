@@ -953,6 +953,17 @@ const App = struct {
     }
 
     fn deinitImpl(self: *App, capture_resume_handoff: bool) app_session_runtime.ShutdownOutcome {
+        // Orchestration runs borrow app-owned services (the live worker for
+        // presentation events, terminal and execution services, usage
+        // metering), so their threads must be cancelled and joined before
+        // anything they borrow is destroyed. Nothing later in teardown reads
+        // orchestration state back.
+        if (comptime build_options.orchestration_enabled) {
+            if (self.orchestration_definition_editor) |*editor| editor.deinit();
+            self.orchestration_definition_editor = null;
+            self.orchestration_definition_manager.deinit(self.alloc);
+            orchestration_app_runtime.deinit(orchestration_host, self.alloc, &self.orchestration);
+        }
         self.auth.stopProviderPreparation();
         // Client.deinit releases the herdr pane (clear agent + label) when enabled.
         self.herdr.deinit();
@@ -993,12 +1004,6 @@ const App = struct {
         self.pending_images.deinit(self.alloc);
         self.input_runtime.deinit(self.alloc);
         self.terminal_input_runtime.deinit(self.alloc);
-        if (comptime build_options.orchestration_enabled) {
-            if (self.orchestration_definition_editor) |*editor| editor.deinit();
-            self.orchestration_definition_editor = null;
-            self.orchestration_definition_manager.deinit(self.alloc);
-            orchestration_app_runtime.deinit(orchestration_host, self.alloc, &self.orchestration);
-        }
         self.shell.deinit(self.alloc);
         self.pacer.deinit(self.alloc);
         self.provider_selection.deinit();
@@ -1262,75 +1267,6 @@ const App = struct {
         return OrchestrationDefinitionAppRuntime.submitManager(self);
     }
 
-    pub fn openOrchestrationDefinitionModelPicker(
-        self: *App,
-        provider_id: []const u8,
-    ) !bool {
-        if (comptime !build_options.orchestration_enabled) return false;
-        const provider = provider_catalog.parse(provider_id) orelse
-            return error.UnknownOrchestrationProvider;
-        if (provider_catalog.find(provider).catalog_scope != .unified) {
-            return error.OrchestrationProviderNotUnified;
-        }
-        if (provider_runtime.provider(self) == provider) {
-            self.ensureModelCache();
-        } else {
-            try self.flushBeforeBlockingExternalWork();
-            const resolution = credentials.resolveForProvider(
-                self.alloc,
-                self.auth.oauthTransport(),
-                self.auth.secretStore(),
-                .refresh_if_needed,
-                provider,
-                null,
-            ) catch {
-                try self.writeDomainNotice(.{
-                    .topic = "model",
-                    .tone = .@"error",
-                    .body = "Could not load credentials for that Team provider.",
-                }, true);
-                return false;
-            };
-            var credential = resolution.credential orelse {
-                self.auth.openPickerForProvider(self.alloc, provider);
-                self.shell.render_requests.request(.footer);
-                return false;
-            };
-            defer credential.deinit(self.alloc);
-            const access = credentials.catalogAccessForCredentialAndAccount(
-                credential.source,
-                credential.token,
-                credential.gatewayTeam(),
-                credential.accountId(),
-            );
-            const fetched = self.fetchProviderCatalog(provider, access) catch {
-                try self.writeDomainNotice(.{
-                    .topic = "model",
-                    .tone = .@"error",
-                    .body = "Could not load that Team provider's model catalog.",
-                }, true);
-                return false;
-            };
-            var catalog = switch (fetched) {
-                .catalog => |value| value,
-                .failure => {
-                    try self.writeDomainNotice(.{
-                        .topic = "model",
-                        .tone = .@"error",
-                        .body = "That Team provider's model catalog could not be validated.",
-                    }, true);
-                    return false;
-                },
-            };
-            defer model_catalog.freeModelCatalog(self.alloc, &catalog);
-            self.model_cache.adoptOwnedCatalog(access, &catalog);
-        }
-        try self.model_cache.openMenu();
-        self.input_runtime.inputResetState().clearCurrent(self.alloc);
-        self.shell.render_requests.request(.footer);
-        return true;
-    }
-
     pub fn orchestrationDefinitionModelSelectionActive(self: *const App) bool {
         if (comptime !build_options.orchestration_enabled) return false;
         if (!self.orchestration_definition_manager.active or
@@ -1398,30 +1334,9 @@ const App = struct {
         return !self.orchestration.active;
     }
 
-    /// Enabling orchestration must never hide or strand native child work.
-    /// Idle and terminal child records remain persisted and become visible
-    /// again after the extension mode is left.
     pub fn nativeSubagentWorkActive(self: *App) !bool {
         if (comptime !build_options.orchestration_enabled) return false;
-        const host_runtime = SessionAppRuntime.subagentHost(self) orelse return false;
-        host_runtime.requestBackgroundRecovery(io_mod.milliTimestamp()) catch {
-            return error.NativeSubagentRecoveryUnsettled;
-        };
-        if (host_runtime.recoveryState() != .complete) {
-            return error.NativeSubagentRecoveryUnsettled;
-        }
-
-        var lock = try host_runtime.managed.state_store.acquireLock(self.alloc);
-        defer lock.release();
-        var registry = try host_runtime.managed.state_store.load(self.alloc);
-        defer registry.deinit(self.alloc);
-        for (registry.children) |child| {
-            switch (child.phase) {
-                .running, .awaiting_approval => return true,
-                .idle, .interrupted, .finished => {},
-            }
-        }
-        return false;
+        return orchestration_app_runtime.nativeSubagentWorkActive(self);
     }
 
     pub fn orchestrationModeEntered(self: *App) void {
@@ -1612,100 +1527,11 @@ const App = struct {
 
     pub fn drainOrchestrationAgentEvents(self: *App) !void {
         if (comptime !build_options.orchestration_enabled) return;
-        try self.startPendingOrchestrationTurn();
-        if (self.orchestration.active_source_turn_id != null) {
-            if (self.worker.cancellationStopsTurn()) {
-                _ = try self.cancelActiveOrchestrationTurn();
-            } else {
-                try self.drainOrchestrationSteering();
-            }
-        }
-        try orchestration_app_runtime.drainRunEvents(
+        try orchestration_agent_run_app_runtime.drainAgentEvents(
             orchestration_host,
             orchestration_extension,
             self,
         );
-    }
-
-    fn startPendingOrchestrationTurn(self: *App) !void {
-        const prompt = self.worker.takeExtensionTurnRequest() orelse return;
-        var owns_prompt = true;
-        defer if (owns_prompt) worker_runtime.freeQueuedPrompt(std.heap.c_allocator, prompt);
-
-        const fallback_user = try types.dupeUserTurn(
-            std.heap.c_allocator,
-            .{ .text = prompt.prompt, .images = prompt.images },
-        );
-        var owns_fallback_user = true;
-        defer if (owns_fallback_user) types.freeUserTurn(std.heap.c_allocator, fallback_user);
-
-        if (!self.orchestration.active or prompt.executor != .extension) {
-            const finished = types.FinishedPrompt{ .turn = .{ .interrupted = .{
-                .user = fallback_user,
-                .terminal_reason = .failed,
-            } } };
-            try self.worker.completeExtensionTurn(prompt.turn_id, finished);
-            owns_fallback_user = false;
-            return;
-        }
-
-        const captured = try orchestration_app_runtime.captureCanonicalTurn(
-            orchestration_host,
-            &self.orchestration,
-            std.heap.c_allocator,
-            prompt,
-        );
-        owns_prompt = false;
-        if (!orchestration_app_runtime.dispatchCanonicalTurn(
-            orchestration_host,
-            orchestration_extension,
-            self,
-            captured,
-            prompt.prompt,
-        )) {
-            const finished = types.FinishedPrompt{ .turn = .{ .interrupted = .{
-                .user = fallback_user,
-                .terminal_reason = .failed,
-            } } };
-            try self.worker.completeExtensionTurn(prompt.turn_id, finished);
-            owns_fallback_user = false;
-        }
-    }
-
-    fn drainOrchestrationSteering(self: *App) !void {
-        const source_turn_id = self.orchestration.active_source_turn_id orelse return;
-        const active_turn_id = self.worker.activeTurnId();
-        if (active_turn_id == 0) return;
-        const boundary = try self.worker.takeSteeringBoundary(
-            std.heap.c_allocator,
-            active_turn_id,
-            if (self.worker.isCancelRequested())
-                worker_runtime.SteeringBoundaryKind.cancelled
-            else
-                .model,
-        );
-        const messages = switch (boundary) {
-            .continue_turn => |msgs| msgs,
-            .none, .handoff, .interrupt => return,
-        };
-        defer {
-            for (messages) |message| std.heap.c_allocator.free(message);
-            if (messages.len > 0) std.heap.c_allocator.free(messages);
-        }
-        for (messages) |message| {
-            const captured = try self.orchestration.canonical_turns.captureTextInstruction(
-                std.heap.c_allocator,
-                source_turn_id,
-                message,
-            );
-            if (!orchestration_app_runtime.dispatchCanonicalInstruction(
-                orchestration_host,
-                orchestration_extension,
-                self,
-                captured,
-                message,
-            )) return;
-        }
     }
 
     pub fn publishOrchestrationAnswer(
@@ -1714,56 +1540,24 @@ const App = struct {
         text: []const u8,
     ) !void {
         if (comptime !build_options.orchestration_enabled) return;
-        const source_turn_id = self.orchestration.active_source_turn_id orelse
-            return error.OrchestrationSourceTurnUnavailable;
-        const user = try self.orchestration.canonical_turns.cloneCombinedUserTurn(
-            std.heap.c_allocator,
-            source_turn_id,
-            self.orchestration.instruction_source_turn_ids.items,
-        );
-        errdefer types.freeUserTurn(std.heap.c_allocator, user);
-        const answer = try std.heap.c_allocator.dupe(u8, text);
-        errdefer std.heap.c_allocator.free(answer);
-        const finished = types.FinishedPrompt{ .turn = .{ .assistant = .{
-            .user = user,
-            .assistant = answer,
-        } } };
-        try self.worker.completeExtensionTurn(self.worker.activeTurnId(), finished);
-        orchestration_app_runtime.releaseCanonicalCustody(
+        try orchestration_agent_run_app_runtime.publishAnswer(
             orchestration_host,
-            self.alloc,
-            &self.orchestration,
+            self,
+            text,
         );
     }
 
     pub fn failOrchestrationTurn(self: *App) !void {
         if (comptime !build_options.orchestration_enabled) return;
-        const source_turn_id = self.orchestration.active_source_turn_id orelse
-            return error.OrchestrationSourceTurnUnavailable;
-        const user = try self.orchestration.canonical_turns.cloneCombinedUserTurn(
-            std.heap.c_allocator,
-            source_turn_id,
-            self.orchestration.instruction_source_turn_ids.items,
-        );
-        errdefer types.freeUserTurn(std.heap.c_allocator, user);
-        const finished = types.FinishedPrompt{ .turn = .{ .interrupted = .{
-            .user = user,
-            .terminal_reason = .failed,
-        } } };
-        try self.worker.completeExtensionTurn(self.worker.activeTurnId(), finished);
-        orchestration_app_runtime.releaseCanonicalCustody(
+        try orchestration_agent_run_app_runtime.failTurn(
             orchestration_host,
-            self.alloc,
-            &self.orchestration,
+            self,
         );
     }
 
     pub fn interruptOrchestrationTurn(self: *App, user: types.UserTurn) !void {
         if (comptime !build_options.orchestration_enabled) return;
-        const finished = types.FinishedPrompt{ .turn = .{ .interrupted = .{
-            .user = user,
-        } } };
-        try self.worker.completeExtensionTurn(self.worker.activeTurnId(), finished);
+        try orchestration_agent_run_app_runtime.interruptTurn(self, user);
     }
 
     pub fn traceOrchestrationFailure(_: *App, extension_id: []const u8, err: anyerror) void {
@@ -4896,7 +4690,22 @@ test "compiled orchestration contributes to the native slash-command surface" {
         const help = try command_specs.renderSlashHelp(std.testing.allocator, app_slash_registry);
         defer std.testing.allocator.free(help);
         try std.testing.expect(std.mem.find(u8, help, descriptor.usage) != null);
-        try std.testing.expect(command_specs.slashCompletionCount(app_slash_registry, "/al") > 0);
+        var fixer_discoverable = false;
+        // Probe a proper prefix of the descriptor's own command so this
+        // generic host test holds for any extension; the bundled Fixer
+        // E2E keeps its own fixed prefix.
+        const command = descriptor.slash_command;
+        const prefix = command[0..@min(@as(usize, 3), command.len -| 1)];
+        const completion_count = command_specs.slashCompletionCount(app_slash_registry, prefix);
+        var completion_index: usize = 0;
+        while (completion_index < completion_count) : (completion_index += 1) {
+            const completion = command_specs.nthSlashCompletion(app_slash_registry, prefix, completion_index) orelse continue;
+            if (std.mem.eql(u8, completion, descriptor.slash_command)) {
+                fixer_discoverable = true;
+                break;
+            }
+        }
+        try std.testing.expect(fixer_discoverable);
     } else {
         try std.testing.expect(app_slash_registry.lookup("/fixer") == null);
     }
@@ -5106,6 +4915,12 @@ test {
     _ = @import("core/session/legacy_background_migration.zig");
     _ = @import("core/orchestration/revision_store.zig");
     _ = @import("core/orchestration/session_binding.zig");
+    // Filtered test builds discover tests only through these
+    // references, so the run-manager, admission, and web-backend
+    // repair tests need theirs listed explicitly.
+    _ = @import("core/orchestration/run_manager.zig");
+    _ = @import("core/orchestration/agent_run_app_runtime.zig");
+    _ = @import("core/tooling/web_backends.zig");
     _ = @import("core/session/prompt_history_store.zig");
     _ = @import("core/app/prompt_history_runtime.zig");
     _ = @import("core/session/web_fetch_artifacts.zig");

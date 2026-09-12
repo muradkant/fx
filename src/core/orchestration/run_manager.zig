@@ -5,6 +5,7 @@ const worker_runtime = @import("../agent/worker_runtime.zig");
 const session_runtime = @import("../session/session.zig");
 const tool_projection = @import("../tooling/tool_projection.zig");
 const tool_runtime = @import("../tooling/tool_runtime.zig");
+const web_backends = @import("../tooling/web_backends.zig");
 const types = @import("../shared/types.zig");
 const io_mod = @import("../shared/io.zig");
 const permission_request = @import("../permissions/permission_request.zig");
@@ -40,10 +41,20 @@ pub const Prepared = struct {
     skills_prompt_section: []u8,
     explicit_skills_prompt_section: []u8,
     response_schema_json: ?[]u8,
+    /// Extension-owned envelope identity and presentation policy, passed
+    /// through to the isolated run untouched. The host holds no product
+    /// opinion about response formats or transcript rendering.
+    response_format_name: ?[]u8,
+    response_format_description: ?[]u8,
+    render_assistant_text: bool,
     lifecycle_session_id: []u8,
     /// Live host worker receiving the run's presentation stream. Borrowed:
     /// it outlives the run. Null keeps the run capture-only.
     live_worker: ?*worker_runtime.WorkerRuntime = null,
+    /// Run-owned web runtimes and their input storage. Heap-allocated so
+    /// the dispatch backends embedded in `tool_context` stay valid when
+    /// this struct moves into manager custody by value.
+    web: *web_backends.Owned,
 
     pub fn deinit(self: *Prepared, alloc: Allocator) void {
         alloc.free(self.run_id);
@@ -52,11 +63,15 @@ pub const Prepared = struct {
         worker_runtime.freeQueuedPrompt(alloc, self.prompt);
         self.tool_projection.deinit(alloc);
         self.permission_rules.deinit(alloc);
+        self.web.deinit(alloc);
+        alloc.destroy(self.web);
         alloc.free(self.system_prompt);
         if (self.model_prompt_overlay) |overlay| alloc.free(overlay);
         alloc.free(self.skills_prompt_section);
         alloc.free(self.explicit_skills_prompt_section);
         if (self.response_schema_json) |schema| alloc.free(schema);
+        if (self.response_format_name) |name| alloc.free(name);
+        if (self.response_format_description) |description| alloc.free(description);
         alloc.free(self.lifecycle_session_id);
         self.* = undefined;
     }
@@ -163,6 +178,9 @@ const Run = struct {
             .advertised_functions = self.prepared.tool_projection.advertised_functions,
             .custom_tool_guidance = self.prepared.tool_projection.custom_guidance,
             .response_schema_json = self.prepared.response_schema_json,
+            .response_format_name = self.prepared.response_format_name,
+            .response_format_description = self.prepared.response_format_description,
+            .render_assistant_text = self.prepared.render_assistant_text,
             .live_worker = self.prepared.live_worker,
         }, &self.prepared.prompt, &self.cancel) catch |err| {
             self.manager.pushFailed(
@@ -238,6 +256,12 @@ pub const Manager = struct {
     approval_binding: ?ApprovalBinding = null,
     question_binding: ?*Run = null,
 
+    /// Tears down the manager. Requires exclusive control over the
+    /// manager's lifecycle: the caller must guarantee no concurrent
+    /// `start` or approval/question submission can run. Production
+    /// admission and approval/question paths live on the serialized
+    /// app/event-loop side, while only joined background run threads
+    /// publish results and history, so teardown never races them there.
     pub fn deinit(self: *Manager) void {
         self.mutex.lockUncancelable(io_mod.getIo());
         for (self.runs.items) |run| {
@@ -246,10 +270,10 @@ pub const Manager = struct {
         }
         const runs = self.runs;
         self.runs = .empty;
-        const events = self.events;
-        self.events = .empty;
-        const context_surfaces = self.context_surfaces;
-        self.context_surfaces = .empty;
+        // The runs below are about to be destroyed; drop the bindings
+        // now so nothing can follow them into freed runs.
+        self.approval_binding = null;
+        self.question_binding = null;
         self.mutex.unlock(io_mod.getIo());
 
         for (runs.items) |run| {
@@ -258,6 +282,17 @@ pub const Manager = struct {
         }
         var owned_runs = runs;
         owned_runs.deinit(self.alloc);
+
+        // Drain only after every run thread is joined: late completions,
+        // failures, and history commits can still arrive while joins are
+        // in flight. Detaching these arrays earlier would abandon the
+        // late allocations when the manager resets below.
+        self.mutex.lockUncancelable(io_mod.getIo());
+        const events = self.events;
+        self.events = .empty;
+        const context_surfaces = self.context_surfaces;
+        self.context_surfaces = .empty;
+        self.mutex.unlock(io_mod.getIo());
         var owned_events = events;
         for (owned_events.items) |event| event.deinit(self.alloc);
         owned_events.deinit(self.alloc);
@@ -630,4 +665,85 @@ test "orchestration run manager has no native subagent dependency" {
     _ = Prepared;
     _ = Event;
     _ = Manager;
+}
+
+test "manager teardown drains events that arrive during thread join" {
+    const Probe = struct {
+        manager: *Manager,
+        cancel: *std.atomic.Value(bool),
+
+        fn run(self: *@This()) void {
+            // Wait for teardown to begin instead of sleeping: deinit
+            // sets cancel while holding the manager lock, before
+            // detaching anything. The push below must acquire that
+            // same lock, so under a detach-before-join ordering this
+            // event strictly postdates the events detach (and leaks
+            // there), while drain-after-join always collects it. The
+            // push precedes thread exit, so it always lands before
+            // the join completes.
+            while (!self.cancel.load(.seq_cst)) {
+                std.atomic.spinLoopHint();
+            }
+            self.manager.pushCompleted("probe-run", "probe-output", 0, 0) catch {};
+        }
+    };
+
+    // std.testing.allocator detects leaks (and is thread-safe); the
+    // previous hand-rolled tally raced its own counters.
+    const alloc = std.testing.allocator;
+    var manager = Manager{ .alloc = alloc };
+    const web = try web_backends.configureOwned(alloc, .{
+        .fx_search = false,
+        .api_key = "",
+        .worker_model = "",
+        .gateway_retry_count = 0,
+        .gateway_chat_url = "",
+        .usage_allocator = alloc,
+    }, .{});
+    const run = try alloc.create(Run);
+    run.* = .{
+        .manager = &manager,
+        .prepared = .{
+            .run_id = try alloc.dupe(u8, "probe-run"),
+            .context_key = null,
+            .source_turn_id = 1,
+            .instruction_source_turn_ids = &.{},
+            .prompt = .{
+                .prompt = try alloc.dupe(u8, ""),
+                .images = &.{},
+                .model = try alloc.dupe(u8, ""),
+                .api_key = try alloc.dupe(u8, ""),
+                .permission_mode = .ask,
+                .history = &.{},
+                .grants = &.{},
+            },
+            // Never executed, read, or freed by teardown; the probe
+            // thread only publishes an event through the manager.
+            .tool_context = undefined,
+            .tool_projection = .{
+                .advertised_names = &.{},
+                .advertised_functions = &.{},
+                .custom_guidance = &.{},
+            },
+            .permission_rules = .{},
+            .system_prompt = try alloc.dupe(u8, ""),
+            .model_prompt_overlay = null,
+            .skills_prompt_section = &.{},
+            .explicit_skills_prompt_section = &.{},
+            .response_schema_json = null,
+            .response_format_name = null,
+            .response_format_description = null,
+            .render_assistant_text = true,
+            .lifecycle_session_id = try alloc.dupe(u8, "probe-run"),
+            .live_worker = null,
+            .web = web,
+        },
+        .session = session_runtime.SessionRuntime.initWithProviders(32, .{}),
+    };
+    var probe = Probe{ .manager = &manager, .cancel = &run.cancel };
+    run.thread = try std.Thread.spawn(.{}, Probe.run, .{&probe});
+    try manager.runs.append(alloc, run);
+    // A pre-existing event must drain alongside the late arrival.
+    try manager.pushCompleted("early-run", "early-output", 0, 0);
+    manager.deinit();
 }

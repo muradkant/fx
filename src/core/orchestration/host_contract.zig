@@ -53,6 +53,131 @@ pub const DefinitionEditorRow = editor_contract.Row;
 pub const DefinitionEditorProjection = editor_contract.Projection;
 pub const DefinitionEditorOutcome = editor_contract.Outcome;
 
+/// Provider-owned model identity encoding shared by the extension editor
+/// (split) and the host adapter (join). Both sides previously reimplemented
+/// the OpenCode route rules; this is now the single definition they share
+/// across the extension boundary. Provider allowlisting stays host-side:
+/// the helper only encodes strings.
+pub const ModelIdentity = struct {
+    route: []const u8,
+    name: []const u8,
+
+    /// Splits a catalog model id into the route/name pair stored on a role.
+    /// OpenCode ids name their route only for Go; every other provider id
+    /// carries an explicit route prefix.
+    pub fn parse(provider_id: []const u8, input: []const u8) !ModelIdentity {
+        if (std.mem.eql(u8, provider_id, "opencode")) {
+            if (std.mem.startsWith(u8, input, "go/")) {
+                return .{ .route = "go", .name = input[3..] };
+            }
+            return .{ .route = "zen", .name = input };
+        }
+        const split = std.mem.indexOfScalar(u8, input, '/') orelse
+            return error.InvalidModelIdentity;
+        return .{ .route = input[0..split], .name = input[split + 1 ..] };
+    }
+
+    /// Best-effort display spelling for a stored route/name pair. Matches
+    /// `format` for every valid identity, so the UI shows what execution
+    /// will actually use. Anything else (including an unrecognized
+    /// OpenCode route) falls back to the generic route/name spelling
+    /// instead of failing, since display must never fail. Returns null
+    /// when the buffer is too small; the caller owns its fallback.
+    pub fn display(
+        self: ModelIdentity,
+        provider_id: []const u8,
+        buffer: []u8,
+    ) ?[]u8 {
+        if (std.mem.eql(u8, provider_id, "opencode") and
+            std.ascii.eqlIgnoreCase(self.route, "zen") and
+            self.name.len <= buffer.len)
+        {
+            @memcpy(buffer[0..self.name.len], self.name);
+            return buffer[0..self.name.len];
+        }
+        // Execution accepts Go case-insensitively but always spells it
+        // lowercase; display the same spelling so the UI shows what
+        // execution will use. Unrecognized routes keep the generic
+        // fallback below.
+        if (std.mem.eql(u8, provider_id, "opencode") and
+            std.ascii.eqlIgnoreCase(self.route, "go"))
+        {
+            return std.fmt.bufPrint(buffer, "go/{s}", .{self.name}) catch null;
+        }
+        return std.fmt.bufPrint(buffer, "{s}/{s}", .{ self.route, self.name }) catch null;
+    }
+
+    /// Joins a stored route/name pair back into the provider's catalog id.
+    /// The caller owns the returned slice.
+    pub fn format(
+        self: ModelIdentity,
+        provider_id: []const u8,
+        alloc: std.mem.Allocator,
+    ) ![]u8 {
+        if (std.mem.eql(u8, provider_id, "opencode")) {
+            if (std.ascii.eqlIgnoreCase(self.route, "zen")) return alloc.dupe(u8, self.name);
+            if (std.ascii.eqlIgnoreCase(self.route, "go")) {
+                return std.fmt.allocPrint(alloc, "go/{s}", .{self.name});
+            }
+            return error.InvalidModelIdentityRoute;
+        }
+        return std.fmt.allocPrint(alloc, "{s}/{s}", .{ self.route, self.name });
+    }
+};
+
+test "model identity round-trips provider catalog ids" {
+    const alloc = std.testing.allocator;
+    const zen = try ModelIdentity.parse("opencode", "kimi-k3");
+    try std.testing.expectEqualStrings("zen", zen.route);
+    try std.testing.expectEqualStrings("kimi-k3", zen.name);
+    const zen_joined = try zen.format("opencode", alloc);
+    defer alloc.free(zen_joined);
+    try std.testing.expectEqualStrings("kimi-k3", zen_joined);
+
+    const go = try ModelIdentity.parse("opencode", "go/kimi-k3");
+    try std.testing.expectEqualStrings("go", go.route);
+    const go_joined = try go.format("opencode", alloc);
+    defer alloc.free(go_joined);
+    try std.testing.expectEqualStrings("go/kimi-k3", go_joined);
+
+    const cline = try ModelIdentity.parse("cline", "z-ai/glm-5.3-flash");
+    try std.testing.expectEqualStrings("z-ai", cline.route);
+    try std.testing.expectEqualStrings("glm-5.3-flash", cline.name);
+    const cline_joined = try cline.format("cline", alloc);
+    defer alloc.free(cline_joined);
+    try std.testing.expectEqualStrings("z-ai/glm-5.3-flash", cline_joined);
+
+    var display_buffer: [64]u8 = undefined;
+    const zen_identity = ModelIdentity{ .route = "zen", .name = "kimi-k3" };
+    try std.testing.expectEqualStrings(
+        "kimi-k3",
+        zen_identity.display("opencode", &display_buffer).?,
+    );
+    const direct_identity = ModelIdentity{ .route = "direct", .name = "kimi-k3" };
+    try std.testing.expectEqualStrings(
+        "direct/kimi-k3",
+        direct_identity.display("opencode", &display_buffer).?,
+    );
+    // Stored routes may carry non-canonical casing; display must match
+    // execution's canonical spelling, not echo the stored bytes.
+    const upper_go = ModelIdentity{ .route = "GO", .name = "kimi-k3" };
+    const upper_go_executed = try upper_go.format("opencode", alloc);
+    defer alloc.free(upper_go_executed);
+    try std.testing.expectEqualStrings(
+        upper_go_executed,
+        upper_go.display("opencode", &display_buffer).?,
+    );
+
+    try std.testing.expectError(
+        error.InvalidModelIdentity,
+        ModelIdentity.parse("cline", "bare-model-without-route"),
+    );
+    try std.testing.expectError(
+        error.InvalidModelIdentityRoute,
+        (ModelIdentity{ .route = "direct", .name = "kimi-k3" }).format("opencode", alloc),
+    );
+}
+
 pub const CatalogScope = enum { provider_native, unified };
 
 pub const ProviderDescriptor = struct {
@@ -175,6 +300,15 @@ pub const AgentRunRequest = struct {
     system_prompt: []const u8,
     visible_input: VisibleInput,
     response_schema_json: ?[]const u8 = null,
+    /// Identity for the envelope described by `response_schema_json`, owned
+    /// by the extension. A schema requires its identity; the host passes
+    /// both through to the agent runtime untouched.
+    response_format_name: ?[]const u8 = null,
+    response_format_description: ?[]const u8 = null,
+    /// Presentation policy for the run's assistant stream, owned by the
+    /// extension. Source-only runs keep wire payloads out of the live
+    /// transcript while operational notices still stream.
+    render_assistant_text: bool = true,
 };
 
 pub const AgentRunStarted = struct {

@@ -190,39 +190,8 @@ const PreparedStreamOperation = struct {
     }
 };
 
-const OpenedRequest = struct {
-    request: ?std.http.Client.Request,
-
-    pub fn deinit(self: *OpenedRequest, _: Allocator) void {
-        if (self.request) |*request| request.deinit();
-        self.request = null;
-    }
-
-    pub fn take(self: *OpenedRequest) std.http.Client.Request {
-        const request = self.request.?;
-        self.request = null;
-        return request;
-    }
-};
-
-const OpenRequestOperation = struct {
-    client: *std.http.Client,
-    uri: std.Uri,
-    auth_header: []const u8,
-
-    pub fn run(self: *@This()) !OpenedRequest {
-        return .{ .request = try self.client.request(.POST, self.uri, .{
-            .headers = .{
-                .content_type = .{ .override = "application/json" },
-                .authorization = .{ .override = self.auth_header },
-                .accept_encoding = .omit,
-                .user_agent = .{ .override = gateway_client.user_agent },
-            },
-            .keep_alive = false,
-            .redirect_behavior = .unhandled,
-        }) };
-    }
-};
+const OpenedRequest = gateway_client.OpenedRequest;
+const OpenRequestOperation = gateway_client.OpenRequestOperation;
 
 pub fn streamPrepared(
     alloc: Allocator,

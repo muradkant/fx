@@ -25,6 +25,7 @@ const Allocator = std.mem.Allocator;
 const ReasoningEffort = types.ReasoningEffort;
 
 fn orchestrationModelId(
+    comptime Host: type,
     alloc: Allocator,
     provider: model_provider.ProviderId,
     route_raw: []const u8,
@@ -37,27 +38,78 @@ fn orchestrationModelId(
     {
         return error.InvalidOrchestrationModelIdentity;
     }
+    const identity = Host.ModelIdentity{ .route = route, .name = name };
     return switch (provider) {
-        .opencode => if (std.ascii.eqlIgnoreCase(route, "zen"))
-            alloc.dupe(u8, name)
-        else if (std.ascii.eqlIgnoreCase(route, "go"))
-            std.fmt.allocPrint(alloc, "go/{s}", .{name})
-        else
-            error.InvalidOpenCodeRoute,
-        .cline => std.fmt.allocPrint(alloc, "{s}/{s}", .{ route, name }),
-        .gateway => std.fmt.allocPrint(alloc, "{s}/{s}", .{ route, name }),
+        .opencode, .cline, .gateway => identity.format(@tagName(provider), alloc) catch |err| {
+            // Only the OpenCode branch validates routes; the other joins
+            // fail only on allocation failure.
+            if (err == error.OutOfMemory) return err;
+            return error.InvalidOpenCodeRoute;
+        },
         .codex, .grok => error.OrchestrationProviderNotUnified,
     };
 }
 
 test "Fixer preserves complete Cline model identities" {
-    const free = try orchestrationModelId(std.testing.allocator, .cline, "z-ai", "glm-5.3-flash");
+    const Host = @import("fx_orchestration_host");
+    const free = try orchestrationModelId(Host, std.testing.allocator, .cline, "z-ai", "glm-5.3-flash");
     defer std.testing.allocator.free(free);
     try std.testing.expectEqualStrings("z-ai/glm-5.3-flash", free);
 
-    const cline_pass = try orchestrationModelId(std.testing.allocator, .cline, "cline-pass", "kimi-k3");
+    const cline_pass = try orchestrationModelId(Host, std.testing.allocator, .cline, "cline-pass", "kimi-k3");
     defer std.testing.allocator.free(cline_pass);
     try std.testing.expectEqualStrings("cline-pass/kimi-k3", cline_pass);
+}
+
+test "admission requires response-format identity alongside a schema" {
+    const Host = @import("fx_orchestration_host");
+    var state = orchestration_app_runtime.State(Host){
+        .active = true,
+        .active_source_turn_id = 7,
+    };
+    defer state.instruction_source_turn_ids.deinit(std.testing.allocator);
+    var request: Host.AgentRunRequest = .{
+        .run_id = "run-1",
+        .authority = .{ .source_turn_id = 7 },
+        .model = .{ .provider_id = "opencode", .route = "zen", .name = "kimi-k3" },
+        .scope = .{ .leader = .{ .agent_id = "leader" } },
+        .context_key = "leader",
+        .system_prompt = "sys",
+        .visible_input = .{ .canonical_turn = .{} },
+        .response_schema_json = "{}",
+    };
+    try std.testing.expectError(
+        error.OrchestrationResponseFormatIdentityMissing,
+        validateAdmission(Host, &state, request),
+    );
+    request.response_format_name = "fixer_orchestration_outcome";
+    request.response_format_description = "outcome";
+    try validateAdmission(Host, &state, request);
+}
+
+test "orchestration joins stored route and name through the shared encoding" {
+    const Host = @import("fx_orchestration_host");
+    const alloc = std.testing.allocator;
+    const zen = try orchestrationModelId(Host, alloc, .opencode, "zen", "kimi-k3");
+    defer alloc.free(zen);
+    try std.testing.expectEqualStrings("kimi-k3", zen);
+
+    const go = try orchestrationModelId(Host, alloc, .opencode, "go", "kimi-k3");
+    defer alloc.free(go);
+    try std.testing.expectEqualStrings("go/kimi-k3", go);
+
+    const gateway = try orchestrationModelId(Host, alloc, .gateway, "z-ai", "glm-5.3-flash");
+    defer alloc.free(gateway);
+    try std.testing.expectEqualStrings("z-ai/glm-5.3-flash", gateway);
+
+    try std.testing.expectError(
+        error.InvalidOpenCodeRoute,
+        orchestrationModelId(Host, alloc, .opencode, "direct", "kimi-k3"),
+    );
+    try std.testing.expectError(
+        error.OrchestrationProviderNotUnified,
+        orchestrationModelId(Host, alloc, .codex, "openai", "gpt-5"),
+    );
 }
 
 fn validOrchestrationModelComponent(value: []const u8) bool {
@@ -128,7 +180,10 @@ pub fn Services(comptime Host: type) type {
         parallel_connected: bool,
         /// Parallel connection key borrowed from app connection state.
         parallel_api_key: ?[]const u8 = null,
-        /// Web tool runtimes owned by the app; configured per run.
+        /// Web tool runtimes owned by the app, borrowed read-only as
+        /// provider/clock/policy templates. Each run receives private
+        /// runtimes via `configureOwned`; the host runtimes are never
+        /// configured per run.
         web: web_backends.Runtimes,
         /// Prompt policy value: system prompt and per-model overlay.
         policy: prompt_policy.Policy,
@@ -187,6 +242,11 @@ fn admit(
     }
     if (request.context_key != null and request.visible_input == .projected) {
         return error.ContextBearingProjectedInput;
+    }
+    if (request.response_schema_json != null and
+        (request.response_format_name == null or request.response_format_description == null))
+    {
+        return error.OrchestrationResponseFormatIdentityMissing;
     }
     const provider = provider_catalog.parse(request.model.provider_id) orelse
         return error.UnknownOrchestrationProvider;
@@ -253,6 +313,7 @@ pub fn start(
 
     try routeOrchestrationCredential(Host, services, &prompt, provider);
     const exact_model = try orchestrationModelId(
+        Host,
         services.alloc,
         provider,
         request.model.route,
@@ -320,7 +381,10 @@ pub fn start(
     tool_context.permission_rules = permission_rules;
     tool_context.subagent_host = null;
     tool_context.subagent_caller_id = null;
-    const configured_backends = web_backends.configure(.{
+    // Each run owns its web runtimes and input storage: configuring the
+    // shared host runtimes here would let a concurrent run steal this run's
+    // credentials and leave dangling borrows once a run is reaped.
+    const web = try web_backends.configureOwned(services.alloc, .{
         .fx_search = bundle.capabilities.fx_search,
         .api_key = prompt.api_key,
         .credential_source = prompt.credential_source,
@@ -332,9 +396,14 @@ pub fn start(
         .usage_allocator = services.alloc,
         .parallel_api_key = services.parallel_api_key,
     }, services.web);
-    tool_context.web_search_backend = configured_backends.web_search;
-    tool_context.web_fetch_backend = configured_backends.web_fetch;
-    tool_context.web_search_runtime_ready = configured_backends.web_search_runtime_ready;
+    var owns_web = true;
+    errdefer if (owns_web) {
+        web.deinit(services.alloc);
+        services.alloc.destroy(web);
+    };
+    tool_context.web_search_backend = web.backends.web_search;
+    tool_context.web_fetch_backend = web.backends.web_fetch;
+    tool_context.web_search_runtime_ready = web.backends.web_search_runtime_ready;
     if (request.visible_input == .projected) {
         tool_context.context_enabled = false;
     }
@@ -404,6 +473,20 @@ pub fn start(
     errdefer if (!strings_transferred) {
         if (response_schema_json) |schema| services.alloc.free(schema);
     };
+    const response_format_name = if (request.response_format_name) |name|
+        try services.alloc.dupe(u8, name)
+    else
+        null;
+    errdefer if (!strings_transferred) {
+        if (response_format_name) |name| services.alloc.free(name);
+    };
+    const response_format_description = if (request.response_format_description) |description|
+        try services.alloc.dupe(u8, description)
+    else
+        null;
+    errdefer if (!strings_transferred) {
+        if (response_format_description) |description| services.alloc.free(description);
+    };
     const lifecycle_session_id = try services.alloc.dupe(u8, request.run_id);
     errdefer if (!strings_transferred) services.alloc.free(lifecycle_session_id);
 
@@ -421,17 +504,187 @@ pub fn start(
         .skills_prompt_section = skills_prompt_section,
         .explicit_skills_prompt_section = explicit_skills_prompt_section,
         .response_schema_json = response_schema_json,
+        .response_format_name = response_format_name,
+        .response_format_description = response_format_description,
+        .render_assistant_text = request.render_assistant_text,
         .lifecycle_session_id = lifecycle_session_id,
         .live_worker = services.live_worker,
+        .web = web,
     };
     var owns_prepared = true;
     errdefer if (owns_prepared) owned_prepared.deinit(services.alloc);
     owns_prompt = false;
     owns_projection = false;
     owns_permission_rules = false;
+    owns_web = false;
     strings_transferred = true;
     try services.state.runs.start(owned_prepared);
     owns_prepared = false;
+}
+
+/// Drains one orchestration event-loop tick: admits a pending extension
+/// turn, applies steering or cancellation, then drains run completions.
+/// Owns the turn-lifecycle glue so the composition root stays declarative.
+pub fn drainAgentEvents(
+    comptime Host: type,
+    comptime Extension: type,
+    app: anytype,
+) !void {
+    try startPendingTurn(Host, Extension, app);
+    if (app.orchestration.active_source_turn_id != null) {
+        if (app.worker.cancellationStopsTurn()) {
+            // Cancellation applies to a live mode; a dangling source turn
+            // without one is left for steering to observe, as before.
+            if (app.orchestration.active) {
+                _ = try orchestration_app_runtime.cancelActiveTurn(Host, Extension, app);
+            }
+        } else {
+            try drainSteering(Host, Extension, app);
+        }
+    }
+    try orchestration_app_runtime.drainRunEvents(Host, Extension, app);
+}
+
+fn startPendingTurn(
+    comptime Host: type,
+    comptime Extension: type,
+    app: anytype,
+) !void {
+    const prompt = app.worker.takeExtensionTurnRequest() orelse return;
+    var owns_prompt = true;
+    defer if (owns_prompt) worker_runtime.freeQueuedPrompt(std.heap.c_allocator, prompt);
+
+    const fallback_user = try types.dupeUserTurn(
+        std.heap.c_allocator,
+        .{ .text = prompt.prompt, .images = prompt.images },
+    );
+    var owns_fallback_user = true;
+    defer if (owns_fallback_user) types.freeUserTurn(std.heap.c_allocator, fallback_user);
+
+    if (!app.orchestration.active or prompt.executor != .extension) {
+        const finished = types.FinishedPrompt{ .turn = .{ .interrupted = .{
+            .user = fallback_user,
+            .terminal_reason = .failed,
+        } } };
+        try app.worker.completeExtensionTurn(prompt.turn_id, finished);
+        owns_fallback_user = false;
+        return;
+    }
+
+    const captured = try orchestration_app_runtime.captureCanonicalTurn(
+        Host,
+        &app.orchestration,
+        std.heap.c_allocator,
+        prompt,
+    );
+    owns_prompt = false;
+    if (!orchestration_app_runtime.dispatchCanonicalTurn(
+        Host,
+        Extension,
+        app,
+        captured,
+        prompt.prompt,
+    )) {
+        const finished = types.FinishedPrompt{ .turn = .{ .interrupted = .{
+            .user = fallback_user,
+            .terminal_reason = .failed,
+        } } };
+        try app.worker.completeExtensionTurn(prompt.turn_id, finished);
+        owns_fallback_user = false;
+    }
+}
+
+fn drainSteering(
+    comptime Host: type,
+    comptime Extension: type,
+    app: anytype,
+) !void {
+    const source_turn_id = app.orchestration.active_source_turn_id orelse return;
+    const active_turn_id = app.worker.activeTurnId();
+    if (active_turn_id == 0) return;
+    const boundary = try app.worker.takeSteeringBoundary(
+        std.heap.c_allocator,
+        active_turn_id,
+        if (app.worker.isCancelRequested())
+            worker_runtime.SteeringBoundaryKind.cancelled
+        else
+            .model,
+    );
+    const messages = switch (boundary) {
+        .continue_turn => |msgs| msgs,
+        .none, .handoff, .interrupt => return,
+    };
+    defer {
+        for (messages) |message| std.heap.c_allocator.free(message);
+        if (messages.len > 0) std.heap.c_allocator.free(messages);
+    }
+    for (messages) |message| {
+        const captured = try app.orchestration.canonical_turns.captureTextInstruction(
+            std.heap.c_allocator,
+            source_turn_id,
+            message,
+        );
+        if (!orchestration_app_runtime.dispatchCanonicalInstruction(
+            Host,
+            Extension,
+            app,
+            captured,
+            message,
+        )) return;
+    }
+}
+
+fn combinedUserForActiveTurn(app: anytype) !types.UserTurn {
+    const source_turn_id = app.orchestration.active_source_turn_id orelse
+        return error.OrchestrationSourceTurnUnavailable;
+    return app.orchestration.canonical_turns.cloneCombinedUserTurn(
+        std.heap.c_allocator,
+        source_turn_id,
+        app.orchestration.instruction_source_turn_ids.items,
+    );
+}
+
+fn releaseTurnCustody(comptime Host: type, app: anytype) void {
+    orchestration_app_runtime.releaseCanonicalCustody(
+        Host,
+        app.alloc,
+        &app.orchestration,
+    );
+}
+
+pub fn publishAnswer(
+    comptime Host: type,
+    app: anytype,
+    text: []const u8,
+) !void {
+    const user = try combinedUserForActiveTurn(app);
+    errdefer types.freeUserTurn(std.heap.c_allocator, user);
+    const answer = try std.heap.c_allocator.dupe(u8, text);
+    errdefer std.heap.c_allocator.free(answer);
+    const finished = types.FinishedPrompt{ .turn = .{ .assistant = .{
+        .user = user,
+        .assistant = answer,
+    } } };
+    try app.worker.completeExtensionTurn(app.worker.activeTurnId(), finished);
+    releaseTurnCustody(Host, app);
+}
+
+pub fn failTurn(comptime Host: type, app: anytype) !void {
+    const user = try combinedUserForActiveTurn(app);
+    errdefer types.freeUserTurn(std.heap.c_allocator, user);
+    const finished = types.FinishedPrompt{ .turn = .{ .interrupted = .{
+        .user = user,
+        .terminal_reason = .failed,
+    } } };
+    try app.worker.completeExtensionTurn(app.worker.activeTurnId(), finished);
+    releaseTurnCustody(Host, app);
+}
+
+pub fn interruptTurn(app: anytype, user: types.UserTurn) !void {
+    const finished = types.FinishedPrompt{ .turn = .{ .interrupted = .{
+        .user = user,
+    } } };
+    try app.worker.completeExtensionTurn(app.worker.activeTurnId(), finished);
 }
 
 fn routeOrchestrationCredential(

@@ -1898,61 +1898,6 @@ pub fn Runtime(comptime App: type) type {
             };
         }
 
-        fn renderSubagentManagerScreen(app: *App) !FrameAttemptResult {
-            if (comptime !@hasField(App, "terminal")) return .{
-                .shadow_state = .committed,
-                .animation_visible = false,
-            };
-            if (comptime @hasDecl(
-                @TypeOf(app.subagents),
-                "activateManagerSurface",
-            )) {
-                app.subagents.activateManagerSurface();
-            }
-            app_lifecycle.enterSubagentManagerScreen(
-                &app.terminal,
-                &app.shell,
-                &app.metrics,
-            ) catch |err| return failSubagentManagerScreen(app, err);
-            if (app.shell.shadow_vt) |grid| {
-                if (grid.cols != app.shell.layout.cols or grid.rows != app.shell.layout.rows) {
-                    grid.resize(app.shell.layout.cols, app.shell.layout.rows) catch |err|
-                        return failSubagentManagerScreen(app, err);
-                }
-            }
-            const main_approval = if (app.approval_prompt.projection()) |projection|
-                projection.request
-            else
-                null;
-            const bytes = app.subagents.panelText(
-                app.alloc,
-                app.shell.layout,
-                main_approval,
-            ) catch |err| return failSubagentManagerScreen(app, err);
-            defer app.alloc.free(bytes);
-            app_lifecycle.writeLifecycleTerminalBytes(
-                &app.shell,
-                &app.metrics,
-                bytes,
-            ) catch |err| return failSubagentManagerScreen(app, err);
-            return .{ .shadow_state = .committed, .animation_visible = false };
-        }
-
-        fn failSubagentManagerScreen(app: *App, err: anyerror) !FrameAttemptResult {
-            debug_trace.logf("subagent", "manager_screen_failed err={s}", .{@errorName(err)});
-            if (comptime @hasField(App, "terminal")) {
-                _ = app_lifecycle.leaveSubagentManagerScreen(
-                    &app.terminal,
-                    &app.shell,
-                    &app.metrics,
-                ) catch {};
-            }
-            app.subagents.close(app.alloc);
-            app.shell.worker_status_state().set_api("Subagent manager unavailable", .danger);
-            app.shell.render_requests.request(.footer);
-            return .{ .shadow_state = .committed, .animation_visible = false };
-        }
-
         fn failApprovalScreen(
             app: *App,
             request_id: u64,

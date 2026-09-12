@@ -485,20 +485,14 @@ pub const Editor = struct {
         if (route_value != .string or name_value != .string) return "Choose model";
         if (route_value.string.len == 0 or name_value.string.len == 0) return "Choose model";
         const slot = self.row_count % self.detail_buffers.len;
-        if (std.mem.eql(u8, self.teamString("provider_id"), "opencode") and
-            std.mem.eql(u8, route_value.string, "zen"))
-        {
-            return std.fmt.bufPrint(
-                &self.detail_buffers[slot],
-                "{s}",
-                .{name_value.string},
-            ) catch "Choose model";
-        }
-        return std.fmt.bufPrint(
+        const identity = host.ModelIdentity{
+            .route = route_value.string,
+            .name = name_value.string,
+        };
+        return identity.display(
+            self.teamString("provider_id"),
             &self.detail_buffers[slot],
-            "{s}/{s}",
-            .{ route_value.string, name_value.string },
-        ) catch "Choose model";
+        ) orelse "Choose model";
     }
 
     fn roleHasModel(self: *Editor, role: RoleRef) bool {
@@ -525,22 +519,10 @@ pub const Editor = struct {
 
     fn setRoleModel(self: *Editor, role: RoleRef, input: []const u8) !void {
         const provider = self.teamString("provider_id");
-        var route: []const u8 = undefined;
-        var name: []const u8 = undefined;
-        if (std.mem.eql(u8, provider, "opencode")) {
-            if (std.mem.startsWith(u8, input, "go/")) {
-                route = "go";
-                name = input[3..];
-            } else {
-                route = "zen";
-                name = input;
-            }
-        } else {
-            const split = std.mem.indexOfScalar(u8, input, '/') orelse
-                return error.InvalidModelId;
-            route = input[0..split];
-            name = input[split + 1 ..];
-        }
+        const identity = host.ModelIdentity.parse(provider, input) catch
+            return error.InvalidModelId;
+        const route = identity.route;
+        const name = identity.name;
         if (route.len == 0 or name.len == 0) return error.InvalidModelId;
         const current = self.modelObject(role) orelse return error.UnknownModel;
         for (self.models().items) |*value| {
@@ -996,6 +978,23 @@ test "role model selection delegates to the native catalog" {
     }
     editor.applySelectedModel("go/deepseek-v4-pro");
     try std.testing.expectEqualStrings("go/deepseek-v4-pro", editor.modelDisplay(.primary));
+}
+
+test "role model selection splits explicit provider routes" {
+    const alloc = std.testing.allocator;
+    const source =
+        "{\"schema\":2,\"id\":\"generated-team\",\"revision\":1,\"name\":\"Generated\",\"provider_id\":\"cline\",\"models\":[" ++
+        "{\"id\":\"primary-model\",\"route\":\"\",\"name\":\"\"},{\"id\":\"peer-model\",\"route\":\"\",\"name\":\"\"}]," ++
+        "\"primary\":{\"id\":\"primary\",\"model_id\":\"primary-model\",\"definition\":\"Own.\"}," ++
+        "\"peers\":[{\"id\":\"peer\",\"model_id\":\"peer-model\",\"definition\":\"Help.\"}],\"specialists\":[]}";
+    var editor = try Editor.init(alloc, source, test_identity_seed, false);
+    defer editor.deinit();
+    try std.testing.expectError(
+        error.InvalidModelId,
+        editor.setRoleModel(.primary, "bare-model-without-route"),
+    );
+    try editor.setRoleModel(.primary, "z-ai/glm-5.3-flash");
+    try std.testing.expectEqualStrings("z-ai/glm-5.3-flash", editor.modelDisplay(.primary));
 }
 
 test "new Team roles receive opaque hidden identities" {

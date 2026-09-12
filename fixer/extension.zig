@@ -7,6 +7,15 @@ const FixerRuntime = runtime_mod.Runtime(host);
 
 pub const DefinitionEditor = definition_editor.Editor;
 
+test {
+    // Reference every extension source so the test target collects tests
+    // from files the suite does not otherwise exercise. Without this, the
+    // Team editor file is never analyzed and its tests silently never run.
+    _ = definition_editor;
+    _ = runtime_mod;
+    _ = team_document;
+}
+
 pub fn descriptor() host.ExtensionDescriptor {
     return .{
         .id = "fixer",

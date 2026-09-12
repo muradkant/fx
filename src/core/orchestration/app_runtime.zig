@@ -1,6 +1,8 @@
 const std = @import("std");
 const provider_catalog = @import("../auth/provider_catalog.zig");
 const types = @import("../shared/types.zig");
+const io_mod = @import("../shared/io.zig");
+const app_session_runtime = @import("../app/app_session_runtime.zig");
 const canonical_turn_store = @import("canonical_turn_store.zig");
 const run_manager = @import("run_manager.zig");
 
@@ -64,6 +66,34 @@ pub fn handleCommand(
     const payload = commandPayload(Extension, input) orelse return false;
     try handlePayload(Host, Extension, app, payload);
     return true;
+}
+
+/// Enabling orchestration must never hide or strand native child work.
+/// Idle and terminal child records remain persisted and become visible
+/// again after the extension mode is left. The composition root exposes
+/// this check behind its `nativeSubagentWorkActive` seam so fixtures can
+/// stub the gate; the recovery and registry logic lives here.
+pub fn nativeSubagentWorkActive(app: anytype) !bool {
+    const SessionRuntime = app_session_runtime.Runtime(@TypeOf(app.*));
+    const host_runtime = SessionRuntime.subagentHost(app) orelse return false;
+    host_runtime.requestBackgroundRecovery(io_mod.milliTimestamp()) catch {
+        return error.NativeSubagentRecoveryUnsettled;
+    };
+    if (host_runtime.recoveryState() != .complete) {
+        return error.NativeSubagentRecoveryUnsettled;
+    }
+
+    var lock = try host_runtime.managed.state_store.acquireLock(app.alloc);
+    defer lock.release();
+    var registry = try host_runtime.managed.state_store.load(app.alloc);
+    defer registry.deinit(app.alloc);
+    for (registry.children) |child| {
+        switch (child.phase) {
+            .running, .awaiting_approval => return true,
+            .idle, .interrupted, .finished => {},
+        }
+    }
+    return false;
 }
 
 pub fn handlePayload(

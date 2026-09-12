@@ -917,7 +917,7 @@ describe.skipIf(SKIP)("tui: orchestration extension host", () => {
           "event=activation_accepted",
         );
 
-        await session.sendLiteral("/al");
+        await session.sendLiteral("/fi");
         await session.waitForPane(
           (pane) =>
             pane.includes("/fixer") &&

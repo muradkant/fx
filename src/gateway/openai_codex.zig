@@ -191,44 +191,8 @@ const PreparedStreamOperation = struct {
     }
 };
 
-const OpenedRequest = struct {
-    request: ?std.http.Client.Request,
-
-    pub fn deinit(self: *OpenedRequest, _: Allocator) void {
-        if (self.request) |*request| request.deinit();
-        self.request = null;
-    }
-
-    pub fn take(self: *OpenedRequest) std.http.Client.Request {
-        const request = self.request.?;
-        self.request = null;
-        return request;
-    }
-};
-
-const OpenRequestOperation = struct {
-    client: *std.http.Client,
-    uri: std.Uri,
-    auth_header: ?[]const u8,
-    extra_headers: []const std.http.Header,
-
-    pub fn run(self: *@This()) !OpenedRequest {
-        var headers: std.http.Client.Request.Headers = .{
-            .content_type = .{ .override = "application/json" },
-            .accept_encoding = .omit,
-            .user_agent = .{ .override = gateway_client.user_agent },
-        };
-        if (self.auth_header) |authorization| {
-            headers.authorization = .{ .override = authorization };
-        }
-        return .{ .request = try self.client.request(.POST, self.uri, .{
-            .headers = headers,
-            .extra_headers = self.extra_headers,
-            .keep_alive = false,
-            .redirect_behavior = .unhandled,
-        }) };
-    }
-};
+const OpenedRequest = gateway_client.OpenedRequest;
+const OpenRequestOperation = gateway_client.OpenRequestOperation;
 
 const RequestAuthHeaders = struct {
     authorization: ?[]u8 = null,

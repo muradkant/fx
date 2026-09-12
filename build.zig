@@ -97,6 +97,7 @@ pub fn build(b: *std.Build) void {
     });
     exe.root_module.addImport("build_options", build_options.createModule());
     var selected_orchestration_extension: ?*std.Build.Module = null;
+    var selected_orchestration_host: ?*std.Build.Module = null;
     if (orchestration_root) |root| {
         const orchestration_host = b.createModule(.{
             .root_source_file = b.path("src/core/orchestration/host_contract.zig"),
@@ -112,6 +113,7 @@ pub fn build(b: *std.Build) void {
         exe.root_module.addImport("fx_orchestration_host", orchestration_host);
         exe.root_module.addImport("orchestration_extension", orchestration_extension);
         selected_orchestration_extension = orchestration_extension;
+        selected_orchestration_host = orchestration_host;
     }
 
     b.installArtifact(exe);
@@ -156,6 +158,11 @@ pub fn build(b: *std.Build) void {
                 "canonical steering preserves ordered user input and authorizes instruction attachments",
                 "isolated service is independent of native subagent modules",
                 "orchestration run manager has no native subagent dependency",
+                "manager teardown drains events that arrive during thread join",
+                "admission requires response-format identity alongside a schema",
+                "owned web backends keep concurrent run inputs isolated",
+                "surviving run executes with owned inputs after temps are released",
+                "owned web backends isolate the parallel branch",
                 "revision store preserves immutable history through edit and delete",
                 "revision store rejects gaps replacement and digest mismatch",
                 "orchestration session binding round trips exact immutable identity",
@@ -175,6 +182,13 @@ pub fn build(b: *std.Build) void {
         );
         selected_extension_test_step.dependOn(&run_orchestration_tests.step);
         selected_extension_test_step.dependOn(&run_orchestration_host_tests.step);
+        if (selected_orchestration_host) |orchestration_host| {
+            // Dependency-module tests are not collected by the other
+            // artifacts, so the host contract gets its own test binary.
+            const host_contract_tests = b.addTest(.{ .root_module = orchestration_host });
+            const run_host_contract_tests = b.addRunArtifact(host_contract_tests);
+            selected_extension_test_step.dependOn(&run_host_contract_tests.step);
+        }
         orchestration_test_step = selected_extension_test_step;
     }
 

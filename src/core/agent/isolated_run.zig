@@ -34,6 +34,15 @@ pub const Config = struct {
     advertised_functions: []const @import("../tooling/model_tool_schema.zig").FunctionSchema = &.{},
     custom_tool_guidance: []const u8 = "",
     response_schema_json: ?[]const u8 = null,
+    /// Response-format identity used when `response_schema_json` is set.
+    /// Owned by the caller: a generic run has no product-specific
+    /// envelope. Orchestration admission requires identity alongside any
+    /// schema; a missing identity here renders empty rather than failing.
+    response_format_name: ?[]const u8 = null,
+    response_format_description: ?[]const u8 = null,
+    /// Whether assistant markdown renders live. Machine-envelope consumers
+    /// keep this false so wire JSON never renders; human-facing runs render.
+    render_assistant_text: bool = true,
     /// Live host worker receiving the run's presentation stream. When set,
     /// assistant text, tool lifecycle, diffs, notices, and command output
     /// are forwarded into its event queue exactly as native turns emit
@@ -150,8 +159,8 @@ pub fn run(
             .advertised_tool_names = config.advertised_tool_names,
             .advertised_functions = config.advertised_functions,
             .response_format = if (parsed_schema) |parsed| .{
-                .name = "fixer_orchestration_outcome",
-                .description = "A strict orchestration outcome selected by the active Fixer role.",
+                .name = config.response_format_name orelse "",
+                .description = config.response_format_description orelse "",
                 .schema = parsed.value,
             } else null,
             .provider_capabilities = config.tool_context.provider_capabilities,
@@ -193,12 +202,10 @@ fn runtimeDeps(context: *Context) agent_runtime.AgentRuntimeDeps {
         .tool_registry = tool_ctx.tool_registry,
         .context_registry = tool_ctx.context_registry,
         .context_enabled = tool_ctx.context_enabled,
-        // Isolated runs never present assistant markdown to a user: every run
-        // ends in a machine envelope (or specialist result) parsed by the
-        // Fixer extension, with human text published via publish_answer.
-        // Stay source-only like ACP so wire JSON never renders live;
-        // operational and restart notices still stream.
-        .render_assistant_text = false,
+        // The caller owns the presentation policy: source-only runs keep
+        // wire payloads out of the live transcript while operational and
+        // restart notices still stream.
+        .render_assistant_text = context.config.render_assistant_text,
         .finalize_turn = finalizeTurn,
         .append_runtime_context = appendRuntimeContext,
         .append_static_context = appendStaticContext,

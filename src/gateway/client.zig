@@ -1830,6 +1830,51 @@ fn runBoundedStreamOperation(
     );
 }
 
+/// An opened POST request held across the bounded-connect operation so a
+/// timeout or cancellation still releases the underlying connection.
+/// Shared by the streaming provider transports.
+pub const OpenedRequest = struct {
+    request: ?std.http.Client.Request,
+
+    pub fn deinit(self: *OpenedRequest, _: std.mem.Allocator) void {
+        if (self.request) |*request| request.deinit();
+        self.request = null;
+    }
+
+    pub fn take(self: *OpenedRequest) std.http.Client.Request {
+        const request = self.request.?;
+        self.request = null;
+        return request;
+    }
+};
+
+/// Opens one JSON POST for `runBoundedHttpOperation`. Authentication stays
+/// optional and provider-supplied; transports without extra headers use the
+/// empty default.
+pub const OpenRequestOperation = struct {
+    client: *std.http.Client,
+    uri: std.Uri,
+    auth_header: ?[]const u8 = null,
+    extra_headers: []const std.http.Header = &.{},
+
+    pub fn run(self: *@This()) !OpenedRequest {
+        var headers: std.http.Client.Request.Headers = .{
+            .content_type = .{ .override = "application/json" },
+            .accept_encoding = .omit,
+            .user_agent = .{ .override = user_agent },
+        };
+        if (self.auth_header) |authorization| {
+            headers.authorization = .{ .override = authorization };
+        }
+        return .{ .request = try self.client.request(.POST, self.uri, .{
+            .headers = headers,
+            .extra_headers = self.extra_headers,
+            .keep_alive = false,
+            .redirect_behavior = .unhandled,
+        }) };
+    }
+};
+
 pub fn runBoundedHttpOperation(
     comptime Result: type,
     alloc: std.mem.Allocator,

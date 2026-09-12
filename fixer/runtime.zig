@@ -620,64 +620,33 @@ pub fn Runtime(comptime host: type) type {
                     return;
                 }
 
-                var new_specialists: ?[]specialist_mod.Call = null;
-                if (specialist_proposals.len > 0) {
-                    new_specialists = specialist_mod.materializeBatch(
-                        self.allocator,
-                        self.team,
-                        completed_agent_id,
-                        session.session_id,
-                        session.next_delegation_ordinal,
-                        specialist_proposals,
-                        session.attachment_references,
-                    ) catch |err| {
-                        if (err == error.OutOfMemory) return err;
-                        try self.rejectAgentProtocol(completed_agent_id, "invalid_specialist_plan", completed.output, completed.run_id, sink);
-                        return;
+                self.materializeOwnerWork(
+                    .leader,
+                    completed_agent_id,
+                    specialist_proposals,
+                    peer_proposals,
+                    completed.run_id,
+                    sink,
+                ) catch |err| {
+                    // Only plan-validation failures ask the model for a
+                    // correction. State and infrastructure failures (a
+                    // genuine double coordination, a failing sink) are not
+                    // plan defects: the plan may be perfectly valid, so they
+                    // propagate instead of misdirecting correction. Resume
+                    // clears settled slots before the owner runs again, so a
+                    // legitimate repeated coordination never observes
+                    // occupied slots.
+                    const code: []const u8 = switch (err) {
+                        error.InvalidSpecialistPlan => "invalid_specialist_plan",
+                        error.InvalidPeerConsultationPlan, error.ConsultationCycle => "invalid_peer_consultation_plan",
+                        error.EmptyTeamCoordination => "empty_team_coordination",
+                        else => return err,
                     };
-                }
-                var new_peers: ?[]peer_mod.Call = null;
-                if (peer_proposals.len > 0) {
-                    new_peers = peer_mod.materializeBatch(
-                        self.allocator,
-                        self.team,
-                        completed_agent_id,
-                        session.session_id,
-                        session.next_peer_ordinal,
-                        peer_proposals,
-                        session.peer_history.items,
-                        session.attachment_references,
-                    ) catch |err| {
-                        if (new_specialists) |calls| specialist_mod.deinitCalls(self.allocator, calls);
-                        if (err == error.OutOfMemory) return err;
-                        try self.rejectAgentProtocol(completed_agent_id, "invalid_peer_consultation_plan", completed.output, completed.run_id, sink);
-                        return;
-                    };
-                }
+                    try self.rejectAgentProtocol(completed_agent_id, code, completed.output, completed.run_id, sink);
+                    return;
+                };
 
                 session.protocol_corrections = 0;
-                session.specialist_calls = new_specialists;
-                session.peer_calls = new_peers;
-                if (new_specialists) |calls| for (calls) |call| {
-                    try self.trace(sink, self.runTrace(
-                        "specialist_delegation_created",
-                        "",
-                        completed.run_id,
-                        call.specialist_id,
-                        call.id,
-                    ));
-                };
-                if (new_peers) |calls| for (calls) |call| {
-                    try self.trace(sink, self.runTrace(
-                        "peer_consultation_created",
-                        "",
-                        completed.run_id,
-                        call.peer_id,
-                        call.id,
-                    ));
-                };
-                session.next_delegation_ordinal += @intCast(specialist_proposals.len);
-                session.next_peer_ordinal += @intCast(peer_proposals.len);
                 try self.scheduleReadySpecialists(.leader, sink);
                 try self.scheduleAllReadyPeers(sink);
                 return;
@@ -829,6 +798,10 @@ pub fn Runtime(comptime host: type) type {
                     // step and can suppress fx tool calls. Zig validates the
                     // terminal envelope after the ordinary fx tool loop instead.
                     .response_schema_json = null,
+                    // Fixer runs end in machine envelopes parsed here, with
+                    // human text published via publish_answer, so runs stay
+                    // source-only: wire JSON never renders live.
+                    .render_assistant_text = false,
                 },
             });
         }
@@ -990,9 +963,21 @@ pub fn Runtime(comptime host: type) type {
                         completed.run_id,
                         sink,
                     ) catch |err| {
-                        if (err == error.OutOfMemory) return err;
-                        try self.rejectConsultationProtocol(frame_index, "invalid_nested_consultation_plan", completed.output, completed.run_id, sink);
-                        return;
+                        // Only plan-validation failures ask the nested peer
+                        // for a correction. State and infrastructure
+                        // failures propagate: the plan may be valid.
+                        switch (err) {
+                            error.InvalidSpecialistPlan,
+                            error.InvalidPeerConsultationPlan,
+                            error.EmptyTeamCoordination,
+                            error.ConsultationCycle,
+                            error.ConsultationDepthExceeded,
+                            => {
+                                try self.rejectConsultationProtocol(frame_index, "invalid_nested_consultation_plan", completed.output, completed.run_id, sink);
+                                return;
+                            },
+                            else => return err,
+                        }
                     };
                     try self.trace(sink, self.runTrace(
                         "peer_consultation_suspended",
@@ -1160,7 +1145,7 @@ pub fn Runtime(comptime host: type) type {
 
             var new_specialists: ?[]specialist_mod.Call = null;
             if (specialist_proposals.len > 0) {
-                new_specialists = try specialist_mod.materializeBatch(
+                new_specialists = specialist_mod.materializeBatch(
                     self.allocator,
                     self.team,
                     caller_id,
@@ -1168,14 +1153,17 @@ pub fn Runtime(comptime host: type) type {
                     session.next_delegation_ordinal,
                     specialist_proposals,
                     session.attachment_references,
-                );
+                ) catch |err| {
+                    if (err == error.OutOfMemory) return err;
+                    return error.InvalidSpecialistPlan;
+                };
             }
             errdefer if (new_specialists) |calls|
                 specialist_mod.deinitCalls(self.allocator, calls);
 
             var new_peers: ?[]peer_mod.Call = null;
             if (peer_proposals.len > 0) {
-                new_peers = try peer_mod.materializeBatch(
+                new_peers = peer_mod.materializeBatch(
                     self.allocator,
                     self.team,
                     caller_id,
@@ -1184,13 +1172,18 @@ pub fn Runtime(comptime host: type) type {
                     peer_proposals,
                     session.peer_history.items,
                     session.attachment_references,
-                );
+                ) catch |err| {
+                    if (err == error.OutOfMemory) return err;
+                    return error.InvalidPeerConsultationPlan;
+                };
             }
             errdefer if (new_peers) |calls|
                 peer_mod.deinitCalls(self.allocator, calls);
 
-            specialist_slot.* = new_specialists;
-            peer_slot.* = new_peers;
+            // Emit creation traces before publishing: the sink is
+            // fallible, and a failure here must free only unpublished
+            // calls. Publishing first would leave session slots pointing
+            // at memory the armed errdefers reclaim.
             for (new_specialists orelse &.{}) |call| {
                 try self.trace(sink, self.runTrace(
                     "specialist_delegation_created",
@@ -1209,6 +1202,8 @@ pub fn Runtime(comptime host: type) type {
                     call.id,
                 ));
             }
+            specialist_slot.* = new_specialists;
+            peer_slot.* = new_peers;
             session.next_delegation_ordinal += @intCast(specialist_proposals.len);
             session.next_peer_ordinal += @intCast(peer_proposals.len);
         }
@@ -1277,30 +1272,36 @@ pub fn Runtime(comptime host: type) type {
                 call.peer_id,
                 call.id,
             ));
-            try sink.emit(.{ .start_agent_run = .{
-                .run_id = run_id,
-                .context_key = peer.id,
-                .authority = .{
-                    .source_turn_id = session.source_turn_id,
-                    .instruction_source_turn_ids = session.instruction_source_turn_ids.items,
+            try sink.emit(.{
+                .start_agent_run = .{
+                    .run_id = run_id,
+                    .context_key = peer.id,
+                    .authority = .{
+                        .source_turn_id = session.source_turn_id,
+                        .instruction_source_turn_ids = session.instruction_source_turn_ids.items,
+                    },
+                    .model = .{
+                        .provider_id = self.team.provider_id,
+                        .route = model.route,
+                        .name = model.name,
+                        .reasoning_effort = model.reasoning_effort,
+                    },
+                    .scope = .{ .peer = .{
+                        .agent_id = call.peer_id,
+                        .collaboration_id = call.collaboration_id,
+                        .round = call.round,
+                    } },
+                    .system_prompt = system_prompt,
+                    .visible_input = .{ .canonical_turn = .{
+                        .supplemental_context = visible_context,
+                    } },
+                    .response_schema_json = null,
+                    // Fixer runs end in machine envelopes parsed here, with
+                    // human text published via publish_answer, so runs stay
+                    // source-only: wire JSON never renders live.
+                    .render_assistant_text = false,
                 },
-                .model = .{
-                    .provider_id = self.team.provider_id,
-                    .route = model.route,
-                    .name = model.name,
-                    .reasoning_effort = model.reasoning_effort,
-                },
-                .scope = .{ .peer = .{
-                    .agent_id = call.peer_id,
-                    .collaboration_id = call.collaboration_id,
-                    .round = call.round,
-                } },
-                .system_prompt = system_prompt,
-                .visible_input = .{ .canonical_turn = .{
-                    .supplemental_context = visible_context,
-                } },
-                .response_schema_json = null,
-            } });
+            });
         }
 
         fn rejectConsultationProtocol(
@@ -1647,6 +1648,10 @@ pub fn Runtime(comptime host: type) type {
                     // fx's ordinary tool loop. The terminal bytes are parsed and
                     // policy-checked strictly in completeAgentRun.
                     .response_schema_json = null,
+                    // Fixer runs end in machine envelopes parsed here, with
+                    // human text published via publish_answer, so runs stay
+                    // source-only: wire JSON never renders live.
+                    .render_assistant_text = false,
                 },
             });
         }
@@ -1902,16 +1907,15 @@ pub fn Runtime(comptime host: type) type {
 
         fn modelLabel(self: *Self, role_id: []const u8) ![]u8 {
             const model = self.roleModel(role_id) orelse return error.UnknownModel;
-            if (std.mem.eql(u8, self.team.provider_id, "opencode") and
-                std.mem.eql(u8, model.route, "zen"))
-            {
-                return self.allocator.dupe(u8, model.name);
-            }
-            return std.fmt.allocPrint(
-                self.allocator,
-                "{s}/{s}",
-                .{ model.route, model.name },
-            );
+            const identity = host.ModelIdentity{ .route = model.route, .name = model.name };
+            return identity.format(self.team.provider_id, self.allocator) catch |err| {
+                if (err == error.OutOfMemory) return err;
+                return std.fmt.allocPrint(
+                    self.allocator,
+                    "{s}/{s}",
+                    .{ model.route, model.name },
+                );
+            };
         }
 
         fn emitActivity(
@@ -3439,4 +3443,56 @@ test "failed peer consultation returns typed failure evidence to the sole leader
     } }, sink);
     try std.testing.expect(capture.answer_seen);
     try std.testing.expectEqual(projection_mod.Status.completed, runtime.session.?.projection.status);
+}
+
+test "coordination trace failure propagates without publishing owned calls" {
+    const Capture = struct {
+        run_id: [192]u8 = undefined,
+        run_id_len: usize = 0,
+        failed_trace: bool = false,
+        render_assistant_text: ?bool = null,
+
+        fn emit(context: *anyopaque, intent: test_host.Intent) !void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            switch (intent) {
+                .start_agent_run => |run| {
+                    @memcpy(self.run_id[0..run.run_id.len], run.run_id);
+                    self.run_id_len = run.run_id.len;
+                    self.render_assistant_text = run.render_assistant_text;
+                },
+                .trace => |record| {
+                    if (!self.failed_trace and std.mem.eql(u8, record.event, "specialist_delegation_created")) {
+                        self.failed_trace = true;
+                        return error.TraceFailureProbe;
+                    }
+                },
+                else => {},
+            }
+        }
+    };
+    var runtime = Runtime(test_host).init(std.testing.allocator, team_mod.fixture());
+    defer runtime.deinit();
+    var capture: Capture = .{};
+    const sink: test_host.IntentSink = .{ .context = &capture, .emit_fn = Capture.emit };
+    const providers = [_]test_host.ProviderDescriptor{.{ .id = "opencode", .display_name = "OpenCode", .catalog_scope = .unified }};
+    try runtime.dispatch(.{ .enter = .{ .conversation_id = "trace-failure", .workspace_path = "/workspace", .providers = &providers } }, sink);
+    try runtime.dispatch(.{ .user_turn = .{ .session_id = "trace-failure-turn", .source_turn_id = 41, .text = "Inspect evidence." } }, sink);
+    const run_id = try std.testing.allocator.dupe(u8, capture.run_id[0..capture.run_id_len]);
+    defer std.testing.allocator.free(run_id);
+    try runtime.dispatch(.{ .agent_run_started = .{ .run_id = run_id } }, sink);
+    const outcome = runtime.dispatch(.{ .agent_run_completed = .{
+        .run_id = run_id,
+        .output = "{\"kind\":\"coordinate\",\"delegations\":[{\"key\":\"read\",\"specialist_id\":\"vision-reader\",\"objective\":\"Inspect evidence.\"}]}",
+    } }, sink);
+    // Infrastructure failures are not plan defects: the sink error must
+    // propagate rather than trigger a protocol correction.
+    try std.testing.expectError(error.TraceFailureProbe, outcome);
+    // The failed coordination must not publish half-owned calls; the
+    // session keeps no pointers to the reclaimed allocations.
+    try std.testing.expect(runtime.session.?.specialist_calls == null);
+    try std.testing.expect(runtime.session.?.peer_calls == null);
+    // The extension owns the run presentation policy: Fixer runs stay
+    // source-only so wire JSON never renders live.
+    try std.testing.expect(capture.render_assistant_text != null);
+    try std.testing.expect(!capture.render_assistant_text.?);
 }
