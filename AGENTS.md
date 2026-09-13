@@ -73,6 +73,28 @@ Key rules:
 
 * `src/acp/` owns the ACP (Agent Client Protocol) JSON-RPC 2.0 server.
 
+### Fixer support and upstream alignment
+
+This fork should remain recognizably fx in its architecture, conventions,
+and behavior. Fixer extends the host through explicit contracts; its Team
+semantics and coordination policy belong in the separate Fixer repository.
+
+Before changing host behavior, inspect the closest native implementation and
+its call path. Prefer extending the existing owner to adding a parallel
+execution, permission, persistence, or rendering mechanism. Keep product
+choices in the extension and pass them through typed host contracts.
+
+Non-invasive does not mean never changing fx. Correct ownership, concurrent
+run isolation, shutdown ordering, and missing host capabilities can require
+host changes. Make those changes cohesive, preserve native guarantees and
+error semantics, and explain why the extension needs them. Avoid embedding
+Fixer-specific decisions in otherwise generic host services.
+
+Judge a patch by its effect on ownership, behavior, and future upstream
+maintenance, not by line count alone. Reuse where lifecycle and failure
+semantics match; keep distinct adapters where combining them would weaken
+those guarantees. Avoid speculative frameworks and unrelated refactors.
+
 ### Adding a Feature
 
 Before implementing, answer in order:
