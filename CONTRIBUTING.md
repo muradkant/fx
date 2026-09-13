@@ -16,6 +16,24 @@ Contributions should preserve that direction:
 
 * honest docs and status reporting
 
+## Fixer and the support fork
+
+This repository is the fx support fork. Current Team definitions, editor,
+coordination, and product protocol changes belong in the separate
+[Fixer repository](https://github.com/ALT-Infra/fixer). Its build selects its
+own extension through `-Dorchestration=custom`; the bundled `fixer/` directory
+here remains a historical implementation and regression fixture.
+
+Keep host contracts, execution, permissions, providers, tools, persistence,
+and rendering here. Publish and verify support changes before updating the
+Git submodule pin in Fixer. The host must not depend on a moving Fixer
+revision. Fixer's CI verifies its current source with the selected host;
+this fork's CI verifies native behavior and its bundled fixture.
+
+The support remote is `https://github.com/ALT-Infra/fx.git`; existing clones
+of the renamed fork should update their `fork` remote accordingly. The
+`upstream` remote remains `https://github.com/vercel-labs/fx.git`.
+
 ## Setup
 
 Requirements:

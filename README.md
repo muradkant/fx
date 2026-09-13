@@ -1,4 +1,4 @@
-# fixer
+# fx support fork
 
 ```
  ⠀⠀⠀⠀⠀⠀⣠⣾⣿⣿⣿⠀⠀⠀⠀⠀⠀⠀⠀
@@ -13,13 +13,15 @@
  ⣿⣿⣿⠟⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀
 ```
 
-fixer is a fork of [vercel-labs/fx](https://github.com/vercel-labs/fx) with Fixer's recursive multi-model Team orchestration bundled as a first-class, replaceable extension.
+This is the fx support fork of [vercel-labs/fx](https://github.com/vercel-labs/fx). Active Fixer orchestration development lives in the separate [Fixer repository](https://github.com/ALT-Infra/fixer), which pins a revision of this fork and builds against its host contract.
+
+This fork owns native execution, providers, permissions, tools, sessions, rendering, and the orchestration host. Its bundled `fixer/` directory is retained as a historical implementation and regression fixture; new Fixer product changes belong in the separate repository. Repository names stay stable when the pinned revision advances.
 
 fx remains the harness. Its terminal UI, model clients, credentials, permission engine, tools, filesystem access, process execution, and persistence infrastructure remain native. Fixer owns only Team definitions, leadership, consultations, specialist projections, bounded orchestration context, and the rules by which results return.
 
 **Development status:** Fixer is experimental but usable through a native guided Team library. It creates, selects, revises, starts, and deletes immutable Teams without exposing their stored JSON documents. Every Fixer session is pinned to the exact Team revision that created it and remains resumable after later revisions or deletion.
 
-Fixer is compiled into normal fixer builds, but **Fixer mode is not active when the application starts**. fixer opens in native fx. `/fixer` resumes the latest Fixer session when one exists and opens the Team library on a fresh installation, `/resume` identifies Fixer sessions by their pinned Team revision, and `/fixer off` returns to a native fx session.
+The historical Fixer implementation is compiled into default support-fork builds, but **Fixer mode is not active when the application starts**. fx opens in native mode. `/fixer` resumes the latest Fixer session when one exists and opens the Team library on a fresh installation, `/resume` identifies Fixer sessions by their pinned Team revision, and `/fixer off` returns to a native fx session. Build the separate Fixer repository for current product development.
 
 The underlying harness remains optimized for research and embeddability as part of larger systems.
 
@@ -31,16 +33,16 @@ It's open source (Apache-2.0), model-agnostic, and suitable for both local and c
 
 ## Build and run
 
-Building fixer requires [Zig 0.16.0+](https://ziglang.org/download/):
+Build the support fork with [Zig 0.16.0](https://ziglang.org/download/):
 
 ```bash
-git clone https://github.com/ALT-Infra/fixer.git
-cd fixer
+git clone https://github.com/ALT-Infra/fx.git
+cd fx
 zig build -Doptimize=ReleaseSafe
 ./zig-out/bin/fx
 ```
 
-ALT-Infra intentionally publishes no fixer release tags or prebuilt releases. Clone the repository and build the current source.
+ALT-Infra intentionally publishes no release tags or prebuilt releases for this support fork. Clone the repository and build the source. The separate Fixer repository owns assembly and verification of current Fixer with its pinned host.
 
 ## Run fx
 
